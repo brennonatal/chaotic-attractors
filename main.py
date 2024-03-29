@@ -22,24 +22,28 @@ class LorenzAttractor:
         x, y, z = self.state
         x = (x * self.scale) + (self.screen_width / 2)
         y = (y * self.scale) + (self.screen_height / 2)
-        z += self.depth
+        # Adjust z for depth effect
+        z *= self.scale
         self.points.append((x, y, z))
 
     def draw(self, screen):
-        for i in range(1, len(self.points)):
-            color = pygame.Color(255, 255, 255)
-            x1, y1, z1 = self.points[i-1]
-            x2, y2, z2 = self.points[i]
-            pygame.draw.line(screen, color, (x1, y1), (x2, y2))
+        if len(self.points) > 1:
+            for i in range(1, len(self.points)):
+                # Use z-coordinate to adjust color brightness
+                z = self.points[i][2]
+                brightness = max(min(255, int(255 - (z + self.depth) / self.depth * 100)), 0)
+                color = pygame.Color(brightness, brightness, brightness)
+                
+                pygame.draw.line(screen, color, self.points[i-1][:2], self.points[i][:2])
 
-# pygame init
+# Initialize Pygame
 pygame.init()
 screen = pygame.display.set_mode((1024, 768))
 pygame.display.set_caption("Lorenz Attractor Simulation")
 clock = pygame.time.Clock()
 attractor = LorenzAttractor()
 
-# main loop
+# Main loop
 running = True
 while running:
     for event in pygame.event.get():
