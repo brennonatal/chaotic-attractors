@@ -13,6 +13,8 @@ class Attractor:
         screen_height=768,
         scale=10,
         depth=500,
+        dot_color=(115, 238, 220),
+        trail_color=(77, 145, 209),
     ):
         """
         Initializes an attractor model with given parameters and prepares the drawing environment.
@@ -22,6 +24,8 @@ class Attractor:
         - screen_width, screen_height: Dimensions of the Pygame window in pixels.
         - scale: A scaling factor for the attractor's coordinates, to adjust its size on the screen.
         - depth: A parameter to adjust the depth effect in the visualization, influencing the brightness of the lines.
+        - dot_color: The RGB color for the current point of the attractor.
+        - trail_color: The RGB color for the trail of the attractor.
 
         The state is initialized to a small value near the origin, and an empty list is prepared to store the points of the attractor.
         """
@@ -35,6 +39,8 @@ class Attractor:
         self.dt = 0.01
         self.state = np.array([0.1, 0, 0])
         self.points = []
+        self.dot_color = pygame.Color(*dot_color)
+        self.trail_color = pygame.Color(*trail_color)
 
     def step(self):
         dx = self.sigma * (self.state[1] - self.state[0]) * self.dt
@@ -52,17 +58,14 @@ class Attractor:
         base_point_size = 3
         base_trail_size = 1
         max_additional_size = 2
-        z = 0
         brightness = 0
 
         # Ensure there is enough points for a trail
         if len(self.points) > 1:
             # Get the minimum and maximum z-values for normalization
-            min_z = min(self.points, key=lambda p: p[2])[2]
-            max_z = max(self.points, key=lambda p: p[2])[2]
-            z_range = (
-                max_z - min_z if max_z - min_z > 0 else 1
-            )  # Prevent division by zero
+            min_z = min(p[2] for p in self.points)
+            max_z = max(p[2] for p in self.points)
+            z_range = max(max_z - min_z, 1)  # Avoid division by zero
 
             trail_length = 50
             trail_points = self.points[-trail_length:]
@@ -76,8 +79,13 @@ class Attractor:
                 )
 
                 # Fade the color based on its position in the trail
-                fade_factor = int(brightness * (i / len(trail_points)))
-                color = pygame.Color(fade_factor, fade_factor, fade_factor)
+                fade_factor = i / len(trail_points)
+                faded_color = self.trail_color.lerp(
+                    pygame.Color(0, 0, 0), 1 - fade_factor
+                )  # Fading to black
+                faded_color.a = int(
+                    brightness * fade_factor
+                )  # Apply brightness to alpha channel
 
                 # Calculate size variation based on z-coordinate
                 size_factor = (z - min_z) / z_range
@@ -85,7 +93,7 @@ class Attractor:
 
                 pygame.draw.line(
                     screen,
-                    color,
+                    faded_color,
                     trail_points[i - 1][:2],
                     trail_points[i][:2],
                     trail_size,
@@ -94,13 +102,14 @@ class Attractor:
         # Draw the current point
         if self.points:
             current_point = self.points[-1]
+            z = current_point[2]
             current_point_size = base_point_size + int(
                 (z / self.depth) * max_additional_size
             )
-            color = pygame.Color(255, 255, 255, brightness)
+            self.dot_color.a = brightness
             pygame.draw.circle(
                 screen,
-                color,
+                self.dot_color,
                 (int(current_point[0]), int(current_point[1])),
                 current_point_size,
             )
