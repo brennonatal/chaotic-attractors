@@ -1,4 +1,5 @@
 from .base_chaotic_attractor import BaseChaoticAttractor
+import numpy as np
 
 
 class ThomasAttractor(BaseChaoticAttractor):
