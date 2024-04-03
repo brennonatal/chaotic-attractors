@@ -37,7 +37,7 @@ class BaseChaoticAttractor:
         """
         raise NotImplementedError("This method should be implemented by subclasses.")
 
-    def generate_trajectory(self, t_span, t_steps=10000):
+    def generate_trajectory(self, t_span=(0, 40), t_steps=10000):
         """
         Generate a trajectory for the chaotic system over a specified time span.
 
