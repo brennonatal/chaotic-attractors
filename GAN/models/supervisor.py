@@ -6,19 +6,19 @@ sys.path.append(os.getcwd())
 from GAN.utils import make_net
 
 
-class Discriminator(Model):
+class Supervisor(Model):
     def __init__(self, hidden_dim, sequence_length, net_type="GRU"):
-        super(Discriminator, self).__init__()
+        super(Supervisor, self).__init__()
         self.model = self.build_model(hidden_dim, sequence_length, net_type)
 
     def build_model(self, hidden_dim, sequence_length, net_type):
-        model = Sequential(name="Discriminator")
-        model.add(layers.InputLayer(shape=(sequence_length, 3)))
+        model = Sequential(name="Supervisor")
+        model.add(layers.InputLayer(shape=(sequence_length, hidden_dim)))
         model = make_net(
             model,
-            n_layers=3,
+            n_layers=2,
             hidden_units=hidden_dim,
-            output_units=1,
+            output_units=hidden_dim,
             net_type=net_type,
         )
         return model

@@ -2,8 +2,8 @@ from tensorflow.keras import Model, Sequential, layers
 import os
 import sys
 
-sys.path.append(os.pardir)
-from .utils import make_net
+sys.path.append(os.getcwd())
+from GAN.utils import make_net
 
 
 class Generator(Model):
@@ -13,7 +13,7 @@ class Generator(Model):
 
     def build_model(self, hidden_dim, sequence_length, net_type):
         model = Sequential(name="Generator")
-        model.add(layers.InputLayer(input_shape=(sequence_length, hidden_dim)))
+        model.add(layers.InputLayer(shape=(sequence_length, hidden_dim)))
         model = make_net(
             model,
             n_layers=3,
@@ -21,6 +21,7 @@ class Generator(Model):
             output_units=hidden_dim,
             net_type=net_type,
         )
+        model.add(layers.TimeDistributed(layers.Dense(3)))
         return model
 
     def call(self, inputs):
