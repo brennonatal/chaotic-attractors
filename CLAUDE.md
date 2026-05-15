@@ -2,71 +2,70 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## What this project is
+
+A **chaotic attractor explorer**: hand-coded classic systems (Lorenz, Rössler, Chen, …) live alongside a random-search pipeline that discovers new 3D quadratic-polynomial attractors and renders them in vispy. The headline workflow is `python search.py` → `python -m animations.explore`.
+
 ## Setup & commands
 
 ```bash
-pip install -r requirements.txt   # numpy, scipy, pygame, PyQt5, vispy
+pip install -e .                                # editable install
+python search.py --n 1000 --le-min 0.05         # discover new attractors → discovered.jsonl
+python -m animations.explore                    # cycle through discoveries with ← / →
+python -m animations.lorenz_3d                  # canonical Lorenz, vispy
+python animations/lorenz_2d.py                  # canonical Lorenz, pygame 2D projection
+python animations/random_2d.py                  # 2D quadratic-map search (older sibling of search.py)
 ```
 
-`requirements.txt` does **not** list `tensorflow` or `scikit-learn`, but the `GAN/` module imports both — install them separately when working on the GAN code.
-
-There is no test suite, linter config, or build step. Each script is run directly. Always run from the repository root, because `GAN/train.py`, `GAN/utils.py`, and `GAN/models/*.py` use `sys.path.append(os.getcwd())` to find the top-level `Attractors` and `GAN` packages:
-
-```bash
-python -m animations.lorenz_3d        # vispy 3D Lorenz visualization
-python animations/lorenz_2d.py        # pygame 2D Lorenz visualization
-python animations/random_2d.py        # random 2D quadratic-map attractor search
-python GAN/train.py                   # runs TimeGAN training (see note below)
-```
-
-Note: `GAN/train.py` executes the full data-loading and training pipeline at **module top level** — there is no `if __name__ == "__main__"` guard. Importing it triggers training. Move new entrypoint logic out of module scope if you need to import from it.
+The project is a proper installable package via `pyproject.toml`. Don't add `sys.path.append(os.getcwd())` anywhere — the editable install handles imports. No test suite, no linter config; scripts run directly.
 
 ## Architecture
 
-The codebase has three independent layers:
+Two packages, one search script.
 
-### 1. `Attractors/` — ODE-integrated chaotic systems
+### `Attractors/` — the load-bearing layer
 
-`BaseChaoticAttractor` (`Attractors/base_chaotic_attractor.py`) wraps `scipy.integrate.solve_ivp`. Subclasses define the dynamics by overriding `next_state(self, t, state, parameters)` to return derivatives, and expose:
+Every attractor (13 hand-coded + `RandomPolynomial3D`) subclasses `BaseChaoticAttractor` (`Attractors/base_chaotic_attractor.py`). The base class owns:
 
-- `DEFAULT_*` class constants for system parameters and initial state.
-- An `__init__` that falls back to those defaults when args are `None`, then calls `super().__init__(initial_state, parameters_tuple)`.
-- `generate_trajectory(t_span, t_steps)` and `generate_perturbed_trajectories(...)` come for free from the base class.
+- `__init__(initial_state=None, **params)` — generic. Subclasses just declare `PARAM_NAMES = ("a", "b", ...)` and `DEFAULT_*` class constants; the base wires defaults automatically. **No `if x is None: x = self.DEFAULT_X` boilerplate in subclasses.**
+- `next_state(t, state, parameters)` — the only thing subclasses override, returning `[dx/dt, dy/dt, dz/dt]`.
+- `generate_trajectory(t_span, t_steps)` — adaptive `scipy.integrate.solve_ivp`. Use for smooth animation-quality output.
+- `integrate_rk4(total_time, dt)` — fixed-step RK4. Use for fast screening of unknown/stiff systems where speed beats precision. Bails out early on divergence.
+- `lyapunov_exponent(total_time, dt, renorm_every, d0, ...)` — two-orbit method on top of `_rk4_step`. Returns ~0.84 for Lorenz, ~0.08 for Rössler. Returns `nan` if either orbit overflows `bound`.
+- `is_chaotic()` — convenience: bounded + positive LE.
+- `generate_perturbed_trajectories(num_trajectories, perturbation_magnitude, ...)` — generates trajectories from perturbed initial states **without permanently mutating** `self.initial_state` (earlier versions of this method had a reset bug; the current implementation restores via `try/finally`).
 
-To add a new attractor:
-1. Create `Attractors/<name>.py` subclassing `BaseChaoticAttractor` (use `lorenz.py` as the template).
-2. Export it from `Attractors/__init__.py`.
-3. Register it in the `attractors` dict in `GAN/utils.py::load_chaotic_data` if it should be available to the GAN pipeline.
+**Adding a new attractor:** create `Attractors/<name>.py` subclassing `BaseChaoticAttractor`, declare `PARAM_NAMES` + `DEFAULT_*` + `next_state`, and re-export from `Attractors/__init__.py`. ~10 lines total (see `lorenz.py` as the canonical template).
 
-### 2. `GAN/` — TimeGAN over chaotic trajectories
+### `Attractors/random_polynomial_3d.py` — the discovery surface
 
-A TimeGAN implementation in TensorFlow/Keras. Five Keras `Model` subclasses live in `GAN/models/` and are all built the same way via `GAN/utils.py::make_net`, which stacks `n_layers` of GRU **or** LSTM (selectable per-call via `net_type`) and tops them with a sigmoid `Dense` output:
+`RandomPolynomial3D(seed=int)` is a `BaseChaoticAttractor` whose dynamics are determined by 30 coefficients sampled from a single seed:
 
-| Model | Input shape | Output | Role |
-|---|---|---|---|
-| `Embedder` | `(seq_len, 3)` | `hidden_dim` | real space → latent |
-| `Recovery` | `(seq_len, hidden_dim)` | `3` | latent → real space |
-| `Generator` | `(seq_len, hidden_dim)` noise | `3` (via extra `TimeDistributed(Dense(3))`) | noise → synthetic series |
-| `Supervisor` | `(seq_len, hidden_dim)` | `hidden_dim` | enforces temporal dynamics (2 layers, not 3) |
-| `Discriminator` | `(seq_len, 3)` | `1` | real vs. fake |
+- Each of `dx, dy, dz` is a dot product over the monomial basis `[1, x, y, z, x², y², z², xy, xz, yz]`.
+- `SPARSITY = 0.5` zeros out roughly half the coefficients — the well-known 3D chaotic systems are all sparse in this basis, and dense random coefficients almost always diverge. Don't increase sparsity past ~0.6 without re-tuning `SAMPLE_RANGE`; it controls hit rate.
+- A single integer **seed reproduces the whole system** — this is why `discovered.jsonl` only needs to store seeds, not the coefficient matrices.
 
-The hardcoded `3` is the number of state variables (x, y, z) — all attractors are 3D. Changing dimensionality requires updating these output shapes in every model file.
+### `search.py` — random-seed search loop
 
-`GAN/utils.py::load_chaotic_data` instantiates the requested attractors with their defaults, generates trajectories (optionally perturbed), and returns an `(n_samples, seq_len, 3)` array. Data is then `MinMaxScaler`-normalized to `[-1, 1]` in `train.py` before training.
+`evaluate(seed)` does prefilter → Lyapunov in this order:
 
-`train_timegan` in `GAN/train.py` runs five training steps per batch (Embedder+Recovery joint, Supervisor, Discriminator, Generator) but is **not** a full TimeGAN — it lacks the joint supervised/embedded generator loss and the autoencoder pretraining phase. Treat it as a work-in-progress baseline.
+1. `integrate_rk4` for `total_time` seconds. Reject if it diverges before reaching the full horizon, exceeds `bound`, or collapses to a fixed point (tiny range across the last 25% of the trajectory).
+2. `lyapunov_exponent` (also RK4-based). Reject if LE < `le_min` or non-finite.
 
-### 3. `animations/` — Standalone visualizers
+Survivors are appended as JSON to `discovered.jsonl` with their `seed`, `lyapunov`, and `bbox`. Typical hit rate at default settings: ~1-2% — expect tens of survivors per thousand seeds.
 
-Three independent scripts, each duplicating its own dynamics inline rather than importing from `Attractors/`:
+### `animations/` — visualizers
 
-- `lorenz_3d.py` — vispy + `TurntableCamera`, vectorized Euler step across `num_points` particles with deque-based fading trails.
-- `lorenz_2d.py` — pygame, 2D projection with z-based brightness/size depth cue.
-- `random_2d.py` — searches for chaotic 2D quadratic maps by random coefficient sampling, classifying via a Lyapunov exponent estimate; rejects converging / diverging / non-chaotic series and renders accepted ones with pygame.
+All three vispy/pygame scripts consume `Attractors/` rather than re-deriving dynamics inline:
 
-If you change Lorenz behavior, note that the dynamics are also duplicated here — they are independent of `Attractors/lorenz.py`.
+- `lorenz_3d.py` — vispy turntable with multi-particle Euler integration of `LorenzAttractor.next_state`. Trails are rendered as fading line segments.
+- `lorenz_2d.py` — pygame 2D projection, z used for brightness + line-thickness depth cues, also driven by `LorenzAttractor.next_state`.
+- `explore.py` — **the headline UI**. Reads `discovered.jsonl`, instantiates each survivor as a `RandomPolynomial3D(seed=...)`, animates it with the same scatter + deque-trail visuals as `lorenz_3d.py`. Keys: `← / →` navigate, `space` resets the particle cloud, `q / Esc` quit. Particles that wander past `BOUND` get pinned to their previous state so a single divergent particle doesn't crash the frame.
+- `random_2d.py` — older standalone script that does the same random-search idea but for 2D *discrete maps* (not ODEs). Self-contained; kept for the 2D aesthetic it produces. Not integrated with `BaseChaoticAttractor` because the discrete-map case doesn't fit that interface.
 
 ## Conventions
 
-- Attractor parameters and initial states are stored as `DEFAULT_*` class constants and packed into a `parameters` tuple passed through `solve_ivp` as `args=(self.parameters,)`. Keep that contract intact — `next_state` unpacks the tuple positionally.
-- Imports across packages rely on running from the repo root; do not change a script to be runnable from a subdirectory without updating the `sys.path` shim consistently.
+- **Subclasses are kwargs-only.** `LorenzAttractor(sigma=12)` works; `LorenzAttractor(initial_state, 12, 28, 2.67)` no longer does. The generic base `__init__` accepts `**params` keyed by `PARAM_NAMES`.
+- **Parameters are stored as a positional tuple** in the order of `PARAM_NAMES` and passed through `solve_ivp` as `args=(self.parameters,)`. `next_state` unpacks positionally — keep that contract intact.
+- **All attractors are 3D.** State is `[x, y, z]`. The polynomial basis in `random_polynomial_3d.py` and the `next_state` shape are hardcoded for 3 dimensions; lifting to nD would require generalizing both.
+- **Reproducibility.** A discovered attractor is just its seed. Don't add stateful randomness to `RandomPolynomial3D.__init__` paths beyond what the seed controls.
