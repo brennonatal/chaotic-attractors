@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chaotic-attractors"
+version = "0.1.0"
+description = "Discover and animate new chaotic attractor formulas."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "vispy>=0.14",
+    "pygame>=2.5",
+    "PyQt5>=5.15",
+]
+
+[tool.setuptools]
+packages = ["Attractors", "animations"]
+py-modules = ["search"]
