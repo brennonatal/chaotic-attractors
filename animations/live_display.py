@@ -133,7 +133,7 @@ class LiveDisplay:
         quality: str,
         auto_seconds: float = 45.0,
         velocity_gain: float = 1.28,
-        gravity_strength: float = 0.25,
+        gravity_strength: float = 0.12,
         proximity_gain: float = 0.85,
         start_index: int = 0,
         fullscreen: bool = True,
@@ -178,7 +178,6 @@ class LiveDisplay:
         self.glow_line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=max(1.6, glow_width * 0.45))
         self.line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=1.4)
         self.stars = scene.visuals.Markers(parent=self.view.scene)
-        self.shadow = scene.visuals.Markers(parent=self.view.scene)
         self.core = scene.visuals.Markers(parent=self.view.scene)
         self.highlight = scene.visuals.Markers(parent=self.view.scene)
         self.title = scene.visuals.Text(
@@ -412,10 +411,12 @@ class LiveDisplay:
         self.framing_center = (mins + maxs) / 2.0
         max_axis = float(np.max(ranges))
         diagonal_radius = float(np.linalg.norm(ranges) * 0.5)
+        # Fit to the bounds the simulation actually visits, with a small
+        # padding margin. The previous formula floored at the full attractor
+        # bbox, which left a gravity-bound cloud as a tiny dot on screen.
         self.framing_scale = max(
-            max_axis * 1.88 + 1.0,
-            diagonal_radius * 1.38 + 1.0,
-            self.display_scale * 1.45 + 1.0,
+            max_axis * 1.45 + 1.0,
+            diagonal_radius * 1.15 + 1.0,
         )
         self.view.camera.center = tuple(self.framing_center)
         self.view.camera.scale_factor = self.framing_scale
@@ -467,14 +468,14 @@ class LiveDisplay:
         # Exponential fade reads as a true "fading trail" — old segments
         # disappear instead of lingering as low-alpha smudges. Fast particles
         # keep slightly longer tails, so velocity becomes legible in the trail.
-        fade = np.exp(-age * (2.6 - 0.95 * speed))
-        color[:, :, 3:4] *= fade * (0.40 + 0.34 * speed) * (0.62 + 0.32 * depth)
+        fade = np.exp(-age * (2.4 - 0.85 * speed))
+        color[:, :, 3:4] *= fade * (0.58 + 0.40 * speed) * (0.70 + 0.30 * depth)
         color = np.clip(color, 0.0, 1.0).astype(np.float32)
         colors = np.repeat(color[:, :, None, :], 2, axis=2).reshape(-1, 4)
 
         # Faint underlay just to soften the line; not a luminous halo any more.
         glow = colors.copy()
-        glow[:, 3] *= 0.08
+        glow[:, 3] *= 0.16
         self.glow_line_visual.set_data(pos=pos, color=glow, connect="segments")
         self.line_visual.set_data(pos=pos, color=colors, connect="segments")
 
@@ -483,36 +484,31 @@ class LiveDisplay:
         head_depth = 0.5 + 0.5 * np.tanh((self.states[:, 2] - self.center[2]) / max(self.display_scale * 0.42, 1e-6))
         phase_1d = np.linspace(0.0, 1.0, self.points, dtype=np.float32)[:, None]
         body_head = palette_array(palette.cool) * (1.0 - phase_1d) + palette_array(palette.hot) * phase_1d
-        # Slight self-shadow / lit-side modulation: depth darkens the back side,
-        # speed adds a touch of warmth. No more excitation-to-head pump that
-        # made fast particles read as neon lights.
-        shade = (0.72 + 0.28 * head_depth[:, None]).astype(np.float32)
-        warmth = 0.08 * head_speed[:, None]
-        core_colors = body_head * shade + palette_array(palette.head) * warmth
-        core_colors[:, 3] = 0.96
+        # Bring the body up so it reads as a lit material against the dark
+        # background. Depth gives a subtle near/far brightness shift, speed
+        # adds a warm tint — but no excitation pump toward the bright head
+        # colour, that's what produced the neon look before.
+        shade = (1.05 + 0.15 * head_depth[:, None]).astype(np.float32)
+        warmth = (0.10 * head_speed[:, None]).astype(np.float32)
+        core_colors = np.clip(body_head * shade + palette_array(palette.head) * warmth, 0.0, 1.0)
+        core_colors[:, 3] = 1.0
 
-        # Specular pinprick — small, dim white hint at the centre of the body.
-        # Reads as the lit side of a sphere rather than a luminous spark.
-        highlight_colors = np.ones_like(core_colors) * np.array([0.96, 0.97, 1.00, 1.0], dtype=np.float32)
-        highlight_colors[:, 3] = np.clip(0.20 + 0.18 * head_depth + 0.10 * head_speed, 0.0, 0.55)
+        # Bright off-white centre — reads as a small specular highlight on a
+        # spherical body, not a luminous spark.
+        highlight_colors = np.tile(np.array([0.96, 0.97, 1.00, 1.0], dtype=np.float32), (self.points, 1))
+        highlight_colors[:, 3] = np.clip(0.55 + 0.25 * head_depth + 0.12 * head_speed, 0.0, 0.92)
 
-        # A soft drop-shadow disc gives the particle volume without glowing.
-        shadow_colors = (core_colors * np.array([0.10, 0.10, 0.10, 1.0], dtype=np.float32))
-        shadow_colors[:, 3] = np.clip(0.18 + 0.10 * head_depth, 0.0, 0.40)
-
-        # Fixed-ish sizes with mild depth perspective. Speed contributes only a
-        # whisper — particles are solids, not balloons that swell when they
+        # Fixed-ish sizes with mild depth perspective. Speed contributes only
+        # a whisper — particles are solids, not balloons that grow when they
         # accelerate.
-        core_sizes = (8.0 + 1.6 * head_speed + 3.2 * head_depth).astype(np.float32)
-        highlight_sizes = (core_sizes * 0.32).astype(np.float32)
-        shadow_sizes = (core_sizes * 1.55 + 1.2).astype(np.float32)
+        core_sizes = (11.0 + 2.0 * head_speed + 4.0 * head_depth).astype(np.float32)
+        highlight_sizes = (core_sizes * 0.34).astype(np.float32)
         # Darker rim around the body sells the spherical read.
-        rim_colors = np.clip(core_colors * np.array([0.28, 0.28, 0.30, 1.0], dtype=np.float32), 0.0, 1.0)
+        rim_colors = np.clip(core_colors * np.array([0.32, 0.32, 0.34, 1.0], dtype=np.float32), 0.0, 1.0)
         rim_colors[:, 3] = 0.95
 
         states = self.states.astype(np.float32)
-        self.shadow.set_data(states, edge_color=None, face_color=np.clip(shadow_colors, 0.0, 1.0), size=shadow_sizes, symbol="disc")
-        self.core.set_data(states, edge_color=rim_colors, face_color=np.clip(core_colors, 0.0, 1.0), size=core_sizes, symbol="disc")
+        self.core.set_data(states, edge_color=rim_colors, edge_width=1.6, face_color=core_colors, size=core_sizes, symbol="disc")
         self.highlight.set_data(states, edge_color=None, face_color=np.clip(highlight_colors, 0.0, 1.0), size=highlight_sizes, symbol="disc")
 
     def update_hud(self) -> None:
@@ -617,7 +613,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=None, help="integration steps per frame")
     parser.add_argument("--auto-seconds", type=float, default=45.0, help="seconds before auto-advancing; 0 disables")
     parser.add_argument("--velocity-gain", type=float, default=1.28, help="global multiplier for dynamic particle flow")
-    parser.add_argument("--gravity", type=float, default=0.25, help="inter-particle gravity strength (0 disables)")
+    parser.add_argument("--gravity", type=float, default=0.12, help="inter-particle gravity strength (0 disables)")
     parser.add_argument("--proximity", type=float, default=0.85, help="speed boost when particles get close (0 disables)")
     parser.add_argument("--index", type=int, default=0, help="start index after sorting by Lyapunov exponent")
     parser.add_argument("--windowed", action="store_true", help="start windowed instead of fullscreen")
