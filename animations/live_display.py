@@ -12,6 +12,8 @@ Controls:
     r           reset the current attractor
     p           switch color palette
     + / -       increase / decrease flow speed
+    [ / ]       decrease / increase inter-particle gravity
+    , / .       decrease / increase proximity speed boost
     h           toggle the minimal HUD
     q / Esc     quit
 """
@@ -131,6 +133,8 @@ class LiveDisplay:
         quality: str,
         auto_seconds: float = 45.0,
         velocity_gain: float = 1.28,
+        gravity_strength: float = 0.12,
+        proximity_gain: float = 0.85,
         start_index: int = 0,
         fullscreen: bool = True,
         size: tuple[int, int] = (1600, 1000),
@@ -145,6 +149,8 @@ class LiveDisplay:
         self.quality = quality
         self.auto_seconds = auto_seconds
         self.velocity_gain = velocity_gain
+        self.gravity_strength = gravity_strength
+        self.proximity_gain = proximity_gain
         self.idx = start_index % len(entries)
         self.palette_idx = 0
         self.paused = False
@@ -167,14 +173,13 @@ class LiveDisplay:
         self.view.camera = scene.TurntableCamera(up="z", fov=42, elevation=24, azimuth=35)
         self.view.camera.interactive = False
 
-        # Glow is a separate low-alpha line pass. Vectorized buffers keep this cheap.
-        self.glow_line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=glow_width)
-        self.line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=1.2)
+        # A faint glow underlay keeps trails from aliasing into pixel grit, but
+        # it's deliberately weak so trails read as motion blur, not neon tube.
+        self.glow_line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=max(1.6, glow_width * 0.45))
+        self.line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=1.4)
         self.stars = scene.visuals.Markers(parent=self.view.scene)
-        self.outer_halo = scene.visuals.Markers(parent=self.view.scene)
-        self.inner_halo = scene.visuals.Markers(parent=self.view.scene)
-        self.spark = scene.visuals.Markers(parent=self.view.scene)
         self.core = scene.visuals.Markers(parent=self.view.scene)
+        self.highlight = scene.visuals.Markers(parent=self.view.scene)
         self.title = scene.visuals.Text(
             "",
             parent=self.canvas.scene,
@@ -201,6 +206,16 @@ class LiveDisplay:
         self.center, self.scale = bbox_center_and_scale(entry["bbox"])
         self.display_scale = max(self.scale, 1.0)
         self.bounds = self.display_scale * 2.6 + 2.0
+        # Gravity is meant to be a visible nudge, not a dominating force.
+        # Strong chaos (large Lyapunov exponent) keeps the cloud spread out, so
+        # it can carry a heavier gravitational pull without collapsing onto a
+        # single point. Quieter attractors get gentler gravity. Softening
+        # bounds the peak per-pair force.
+        lyapunov = float(entry.get("lyapunov", 0.5))
+        self.gravity_adapt = max(0.0, min(1.0, (lyapunov / 1.5) ** 2))
+        self.gravity_coupling = self.gravity_strength * self.gravity_adapt * self.display_scale ** 2 * 0.18
+        self.gravity_softening_sq = max(self.display_scale * 0.18, 0.18) ** 2
+        self.proximity_radius = max(self.display_scale * 0.30, 0.30)
 
         rng = np.random.default_rng(entry["seed"] + self.points)
         self.initial_origin = np.asarray(self.attractor.initial_state, dtype=np.float64)
@@ -273,12 +288,36 @@ class LiveDisplay:
         micro = 1.0 + 0.035 * np.sin(tick * 0.043 + self.speed_phase * 1.71)
         return np.clip(self.dt * self.velocity_gain * self.base_speed * breath * pulse * micro, self.dt * 0.45, self.dt * 2.25)
 
+    def gravity_field(self, states: np.ndarray) -> np.ndarray:
+        """Pairwise softened inverse-square attraction between particles."""
+        if self.gravity_coupling == 0.0:
+            return np.zeros_like(states)
+        diff = states[None, :, :] - states[:, None, :]                          # (N, N, 3)
+        dist_sq = np.einsum("ijk,ijk->ij", diff, diff) + self.gravity_softening_sq
+        inv_r3 = dist_sq ** -1.5
+        np.fill_diagonal(inv_r3, 0.0)
+        return self.gravity_coupling * np.einsum("ij,ijk->ik", inv_r3, diff)
+
+    def proximity_factor(self, states: np.ndarray) -> np.ndarray:
+        """Per-particle timestep multiplier: closer to a neighbour → faster."""
+        if self.proximity_gain == 0.0:
+            return np.ones(len(states), dtype=np.float64)
+        diff = states[None, :, :] - states[:, None, :]
+        dist = np.sqrt(np.einsum("ijk,ijk->ij", diff, diff) + 1e-9)
+        np.fill_diagonal(dist, np.inf)
+        nearest = np.min(dist, axis=1)
+        closeness = np.clip(1.0 - nearest / self.proximity_radius, 0.0, 1.0)
+        return 1.0 + self.proximity_gain * closeness * closeness
+
+    def field(self, states: np.ndarray) -> np.ndarray:
+        return self.derivatives(states) + self.gravity_field(states)
+
     def integrate_states(self, states: np.ndarray, tick: int) -> np.ndarray:
-        h = self.dynamic_timestep(tick)[:, None]
-        k1 = self.derivatives(states)
-        k2 = self.derivatives(states + 0.5 * h * k1)
-        k3 = self.derivatives(states + 0.5 * h * k2)
-        k4 = self.derivatives(states + h * k3)
+        h = (self.dynamic_timestep(tick) * self.proximity_factor(states))[:, None]
+        k1 = self.field(states)
+        k2 = self.field(states + 0.5 * h * k1)
+        k3 = self.field(states + 0.5 * h * k2)
+        k4 = self.field(states + h * k3)
         return states + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
     def rk4_step(self, tick: int) -> None:
@@ -372,10 +411,12 @@ class LiveDisplay:
         self.framing_center = (mins + maxs) / 2.0
         max_axis = float(np.max(ranges))
         diagonal_radius = float(np.linalg.norm(ranges) * 0.5)
+        # Fit to the bounds the simulation actually visits, with a small
+        # padding margin. The previous formula floored at the full attractor
+        # bbox, which left a gravity-bound cloud as a tiny dot on screen.
         self.framing_scale = max(
-            max_axis * 1.88 + 1.0,
-            diagonal_radius * 1.38 + 1.0,
-            self.display_scale * 1.45 + 1.0,
+            max_axis * 1.45 + 1.0,
+            diagonal_radius * 1.15 + 1.0,
         )
         self.view.camera.center = tuple(self.framing_center)
         self.view.camera.scale_factor = self.framing_scale
@@ -418,17 +459,23 @@ class LiveDisplay:
         ghost = palette_array(palette.ghost)[None, None, :]
 
         body = cool * (1.0 - phase) + hot * phase
-        excitation = np.clip(0.10 + 0.54 * speed + 0.30 * curvature + 0.14 * depth, 0.0, 1.0)
-        color = body * (1.0 - excitation) + head * excitation
+        # Subtle head-tint along very fast / very curved segments only —
+        # enough to add motion clarity, not enough to make the trail glow.
+        accent = np.clip(0.14 * speed + 0.08 * curvature, 0.0, 0.28)
+        color = body * (1.0 - accent) + head * accent
         ghost_mix = np.power(age, 0.95)
         color = color * (1.0 - ghost_mix) + ghost * ghost_mix
-        fade = np.power(1.0 - age, 0.74 + 0.16 * speed)
-        color[:, :, 3:4] *= fade * (0.46 + 0.54 * speed) * (0.68 + 0.35 * depth)
+        # Exponential fade reads as a true "fading trail" — old segments
+        # disappear instead of lingering as low-alpha smudges. Fast particles
+        # keep slightly longer tails, so velocity becomes legible in the trail.
+        fade = np.exp(-age * (2.4 - 0.85 * speed))
+        color[:, :, 3:4] *= fade * (0.58 + 0.40 * speed) * (0.70 + 0.30 * depth)
         color = np.clip(color, 0.0, 1.0).astype(np.float32)
         colors = np.repeat(color[:, :, None, :], 2, axis=2).reshape(-1, 4)
 
+        # Faint underlay just to soften the line; not a luminous halo any more.
         glow = colors.copy()
-        glow[:, 3] *= 0.24
+        glow[:, 3] *= 0.16
         self.glow_line_visual.set_data(pos=pos, color=glow, connect="segments")
         self.line_visual.set_data(pos=pos, color=colors, connect="segments")
 
@@ -437,31 +484,32 @@ class LiveDisplay:
         head_depth = 0.5 + 0.5 * np.tanh((self.states[:, 2] - self.center[2]) / max(self.display_scale * 0.42, 1e-6))
         phase_1d = np.linspace(0.0, 1.0, self.points, dtype=np.float32)[:, None]
         body_head = palette_array(palette.cool) * (1.0 - phase_1d) + palette_array(palette.hot) * phase_1d
-        excite = np.clip(0.22 + 0.58 * head_speed[:, None] + 0.26 * head_curve[:, None], 0.0, 1.0)
-        core_colors = body_head * (1.0 - excite) + palette_array(palette.head) * excite
-        core_colors[:, 3] = 0.88 + 0.12 * head_speed
+        # Bring the body up so it reads as a lit material against the dark
+        # background. Depth gives a subtle near/far brightness shift, speed
+        # adds a warm tint — but no excitation pump toward the bright head
+        # colour, that's what produced the neon look before.
+        shade = (1.05 + 0.15 * head_depth[:, None]).astype(np.float32)
+        warmth = (0.10 * head_speed[:, None]).astype(np.float32)
+        core_colors = np.clip(body_head * shade + palette_array(palette.head) * warmth, 0.0, 1.0)
+        core_colors[:, 3] = 1.0
 
-        spark_colors = palette_array(palette.head) * 0.72 + core_colors * 0.28
-        spark_colors[:, 3] = np.clip(0.34 + 0.46 * head_speed + 0.24 * head_curve, 0.0, 0.92)
+        # Bright off-white centre — reads as a small specular highlight on a
+        # spherical body, not a luminous spark.
+        highlight_colors = np.tile(np.array([0.96, 0.97, 1.00, 1.0], dtype=np.float32), (self.points, 1))
+        highlight_colors[:, 3] = np.clip(0.55 + 0.25 * head_depth + 0.12 * head_speed, 0.0, 0.92)
 
-        inner_halo_colors = core_colors.copy()
-        inner_halo_colors[:, 3] = np.clip(0.11 + 0.23 * head_speed + 0.16 * head_curve, 0.0, 0.55)
-        outer_halo_colors = core_colors.copy()
-        outer_halo_colors[:, 3] = np.clip(0.025 + 0.11 * head_speed + 0.08 * head_curve, 0.0, 0.28)
-
-        # Fewer particles, but each reads as a luminous body: large soft aura,
-        # tight inner glow, bright spark, then a crisp core with a subtle rim.
-        core_sizes = (6.0 + 9.5 * head_speed + 3.8 * head_curve + 1.8 * head_depth).astype(np.float32)
-        spark_sizes = (2.5 + 3.7 * head_speed + 2.4 * head_curve).astype(np.float32)
-        inner_halo_sizes = (21.0 + 43.0 * head_speed + 26.0 * head_curve + 7.0 * head_depth).astype(np.float32)
-        outer_halo_sizes = (48.0 + 92.0 * head_speed + 44.0 * head_curve + 14.0 * head_depth).astype(np.float32)
-        rim_colors = np.clip(core_colors * np.array([1.05, 1.05, 1.05, 0.44], dtype=np.float32), 0.0, 1.0)
+        # Fixed-ish sizes with mild depth perspective. Speed contributes only
+        # a whisper — particles are solids, not balloons that grow when they
+        # accelerate.
+        core_sizes = (11.0 + 2.0 * head_speed + 4.0 * head_depth).astype(np.float32)
+        highlight_sizes = (core_sizes * 0.34).astype(np.float32)
+        # Darker rim around the body sells the spherical read.
+        rim_colors = np.clip(core_colors * np.array([0.32, 0.32, 0.34, 1.0], dtype=np.float32), 0.0, 1.0)
+        rim_colors[:, 3] = 0.95
 
         states = self.states.astype(np.float32)
-        self.outer_halo.set_data(states, edge_color=None, face_color=np.clip(outer_halo_colors, 0.0, 1.0), size=outer_halo_sizes, symbol="disc")
-        self.inner_halo.set_data(states, edge_color=None, face_color=np.clip(inner_halo_colors, 0.0, 1.0), size=inner_halo_sizes, symbol="disc")
-        self.spark.set_data(states, edge_color=None, face_color=np.clip(spark_colors, 0.0, 1.0), size=spark_sizes, symbol="disc")
-        self.core.set_data(states, edge_color=rim_colors, face_color=np.clip(core_colors, 0.0, 1.0), size=core_sizes, symbol="disc")
+        self.core.set_data(states, edge_color=rim_colors, edge_width=1.6, face_color=core_colors, size=core_sizes, symbol="disc")
+        self.highlight.set_data(states, edge_color=None, face_color=np.clip(highlight_colors, 0.0, 1.0), size=highlight_sizes, symbol="disc")
 
     def update_hud(self) -> None:
         if not self.show_hud:
@@ -471,6 +519,7 @@ class LiveDisplay:
         self.title.text = (
             f"CHAOTIC ATTRACTORS  ·  {self.idx + 1:02d}/{len(self.entries):02d}  "
             f"seed {entry['seed']}  ·  λ {entry['lyapunov']:.3f}  ·  flow {self.velocity_gain:.2f}×  "
+            f"·  g {self.gravity_strength:.2f}  ·  prox {self.proximity_gain:.2f}  "
             f"·  {self.quality}  ·  {self.palette.name}"
         )
 
@@ -504,6 +553,28 @@ class LiveDisplay:
             self.update_hud()
         elif key in ("-", "_"):
             self.velocity_gain = max(0.30, self.velocity_gain - 0.12)
+            self.precompute_camera_framing()
+            self.apply_camera_framing()
+            self.update_hud()
+        elif key in ("]", "}"):
+            self.gravity_strength = min(3.0, self.gravity_strength + 0.1)
+            self.gravity_coupling = self.gravity_strength * self.gravity_adapt * self.display_scale ** 2 * 0.18
+            self.precompute_camera_framing()
+            self.apply_camera_framing()
+            self.update_hud()
+        elif key in ("[", "{"):
+            self.gravity_strength = max(0.0, self.gravity_strength - 0.1)
+            self.gravity_coupling = self.gravity_strength * self.gravity_adapt * self.display_scale ** 2 * 0.18
+            self.precompute_camera_framing()
+            self.apply_camera_framing()
+            self.update_hud()
+        elif key in (".", ">"):
+            self.proximity_gain = min(3.0, self.proximity_gain + 0.1)
+            self.precompute_camera_framing()
+            self.apply_camera_framing()
+            self.update_hud()
+        elif key in (",", "<"):
+            self.proximity_gain = max(0.0, self.proximity_gain - 0.1)
             self.precompute_camera_framing()
             self.apply_camera_framing()
             self.update_hud()
@@ -542,6 +613,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=None, help="integration steps per frame")
     parser.add_argument("--auto-seconds", type=float, default=45.0, help="seconds before auto-advancing; 0 disables")
     parser.add_argument("--velocity-gain", type=float, default=1.28, help="global multiplier for dynamic particle flow")
+    parser.add_argument("--gravity", type=float, default=0.12, help="inter-particle gravity strength (0 disables)")
+    parser.add_argument("--proximity", type=float, default=0.85, help="speed boost when particles get close (0 disables)")
     parser.add_argument("--index", type=int, default=0, help="start index after sorting by Lyapunov exponent")
     parser.add_argument("--windowed", action="store_true", help="start windowed instead of fullscreen")
     parser.add_argument("--no-hud", action="store_true", help="hide the minimal overlay text")
@@ -561,6 +634,8 @@ def main() -> None:
         quality=args.quality,
         auto_seconds=args.auto_seconds,
         velocity_gain=args.velocity_gain,
+        gravity_strength=args.gravity,
+        proximity_gain=args.proximity,
         start_index=args.index,
         fullscreen=not args.windowed,
         show_hud=not args.no_hud,
