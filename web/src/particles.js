@@ -97,9 +97,9 @@ const WORLD_LIGHT = new THREE.Vector3(0.55, 1.0, 0.6).normalize();
 const _tmpLight = new THREE.Vector3();
 
 export class ParticleField {
-  constructor(attractor, palette) {
+  constructor(attractor, scheme) {
     this.attractor = attractor;
-    this.palette = palette;
+    this.scheme = scheme;
     this.count = attractor.points;
 
     const geom = new THREE.InstancedBufferGeometry();
@@ -124,8 +124,8 @@ export class ParticleField {
       uniforms: {
         uProjectionMatrix: { value: new THREE.Matrix4() },
         uLightDir: { value: new THREE.Vector3(0, 0, 1) },
-        uRimColor: { value: new THREE.Color(palette.head[0], palette.head[1], palette.head[2]) },
-        uSpecColor: { value: new THREE.Color(1.0, 1.0, 1.0) },
+        uRimColor: { value: new THREE.Color(scheme.rimColor[0], scheme.rimColor[1], scheme.rimColor[2]) },
+        uSpecColor: { value: new THREE.Color(scheme.specColor[0], scheme.specColor[1], scheme.specColor[2]) },
         uAmbient: { value: 0.18 },
         uRimStrength: { value: 0.42 },
         uSpecStrength: { value: 0.55 },
@@ -142,17 +142,11 @@ export class ParticleField {
   }
 
   _writeStaticAttributes() {
-    const cool = this.palette.cool;
-    const hot = this.palette.hot;
-    const colors = this.iColor.array;
+    // Per-particle colour comes straight from the scheme (vivid hues at the
+    // golden angle around the wheel). Radii are uniform across the cloud.
+    this.iColor.array.set(this.scheme.particleColors);
     const radii = this.iRadius.array;
-    for (let i = 0; i < this.count; i++) {
-      const t = this.count > 1 ? i / (this.count - 1) : 0;
-      colors[i * 3 + 0] = cool[0] * (1 - t) + hot[0] * t;
-      colors[i * 3 + 1] = cool[1] * (1 - t) + hot[1] * t;
-      colors[i * 3 + 2] = cool[2] * (1 - t) + hot[2] * t;
-      radii[i] = this.baseRadius;
-    }
+    for (let i = 0; i < this.count; i++) radii[i] = this.baseRadius;
     this.iColor.needsUpdate = true;
     this.iRadius.needsUpdate = true;
   }

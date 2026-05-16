@@ -1,71 +1,75 @@
-// Direct port of the Pantone-inspired palette set from animations/live_display.py.
-// Each colour is RGBA in [0, 1] in *linear* space — three.js's WebGLRenderer
-// gamma-encodes to sRGB on output, so feeding it raw 0..1 from hex would
-// double-encode and wash everything out.
+// Per-attractor vivid colour scheme. Each attractor's seed picks a base
+// hue rotation; particles are then laid out at the golden angle around
+// the hue wheel so neighbouring indices are always visually distinct,
+// and lightness wobbles a touch so the bloom doesn't read as monotone.
+//
+// Everything returned here is in *linear* RGB space — three.js's
+// WebGLRenderer gamma-encodes to sRGB at output, so feeding it raw 0..1
+// would double-encode and wash everything out.
 
 function srgbToLinear(c) {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
 }
 
-function hex(value, alpha = 1.0) {
-  const v = value.replace(/^#/, "");
-  return [
-    srgbToLinear(parseInt(v.slice(0, 2), 16) / 255),
-    srgbToLinear(parseInt(v.slice(2, 4), 16) / 255),
-    srgbToLinear(parseInt(v.slice(4, 6), 16) / 255),
-    alpha,
-  ];
+function hslToLinearRgb(h, s, l) {
+  const hp = ((((h % 360) + 360) % 360)) / 60;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r, g, b;
+  if (hp < 1)      { r = c; g = x; b = 0; }
+  else if (hp < 2) { r = x; g = c; b = 0; }
+  else if (hp < 3) { r = 0; g = c; b = x; }
+  else if (hp < 4) { r = 0; g = x; b = c; }
+  else if (hp < 5) { r = x; g = 0; b = c; }
+  else             { r = c; g = 0; b = x; }
+  const m = l - c / 2;
+  return [srgbToLinear(r + m), srgbToLinear(g + m), srgbToLinear(b + m)];
 }
 
-export const PALETTES = [
-  {
-    name: "mocha periwinkle",
-    background: hex("0B0A10"),
-    fog:        hex("2A1E22", 0.14),
-    head:       hex("F7E1D2", 0.98),
-    hot:        hex("A47864", 0.76),
-    cool:       hex("6667AB", 0.66),
-    ghost:      hex("0B0A10", 0.00),
-    star:       hex("F2D8C2", 0.22),
-  },
-  {
-    name: "peach ink",
-    background: hex("080A12"),
-    fog:        hex("281B25", 0.15),
-    head:       hex("FFE4D6", 0.98),
-    hot:        hex("FFBE98", 0.78),
-    cool:       hex("5B7C99", 0.64),
-    ghost:      hex("080A12", 0.00),
-    star:       hex("FFD6BF", 0.20),
-  },
-  {
-    name: "viva cyan",
-    background: hex("0A0710"),
-    fog:        hex("2B0E22", 0.16),
-    head:       hex("FDE7F0", 0.98),
-    hot:        hex("BB2649", 0.78),
-    cool:       hex("00A6A6", 0.64),
-    ghost:      hex("0A0710", 0.00),
-    star:       hex("F4A3B7", 0.20),
-  },
-  {
-    name: "serenity coral",
-    background: hex("071018"),
-    fog:        hex("10253A", 0.15),
-    head:       hex("F4FBFF", 0.98),
-    hot:        hex("F7786B", 0.76),
-    cool:       hex("92A8D1", 0.66),
-    ghost:      hex("071018", 0.00),
-    star:       hex("C9D8F2", 0.19),
-  },
-  {
-    name: "greenery ultraviolet",
-    background: hex("070C09"),
-    fog:        hex("102618", 0.14),
-    head:       hex("F4FFE8", 0.98),
-    hot:        hex("88B04B", 0.76),
-    cool:       hex("5F4B8B", 0.66),
-    ghost:      hex("070C09", 0.00),
-    star:       hex("D9F2B4", 0.18),
-  },
-];
+function mulberry32(seed) {
+  let a = (seed >>> 0) || 1;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Golden angle in turns — multiplying by 360 gives the equivalent in degrees.
+const GOLDEN_ANGLE_TURNS = 0.6180339887;
+
+export function makeColorScheme(seed, particleCount) {
+  const rng = mulberry32(((seed | 0) ^ 0xC0FFEE) >>> 0);
+  const baseHue = rng() * 360;
+  const accentHue = (baseHue + 60 + rng() * 240) % 360;
+
+  // Per-particle vivid colours. Golden-angle hue spacing keeps adjacent
+  // indices distinct; saturation pinned high (synthwave), lightness gently
+  // jittered around 0.55 so bloom doesn't fuse everything into one blob.
+  const particleColors = new Float32Array(particleCount * 3);
+  for (let i = 0; i < particleCount; i++) {
+    const h = baseHue + i * 360 * GOLDEN_ANGLE_TURNS;
+    const l = 0.52 + 0.10 * (rng() - 0.5);
+    const [r, g, b] = hslToLinearRgb(h, 0.95, l);
+    particleColors[i * 3 + 0] = r;
+    particleColors[i * 3 + 1] = g;
+    particleColors[i * 3 + 2] = b;
+  }
+
+  // Deep near-black background tinted faintly toward the base hue, so the
+  // void isn't pure RGB-zero (which can read as a dead screen).
+  const [bgR, bgG, bgB] = hslToLinearRgb(baseHue, 0.5, 0.025);
+  // Stars: lightly toward the accent hue so they tie the scene together.
+  const [stR, stG, stB] = hslToLinearRgb(accentHue, 0.3, 0.78);
+
+  return {
+    name: `vivid ${Math.round(baseHue).toString().padStart(3, "0")}°`,
+    background: [bgR, bgG, bgB, 1.0],
+    particleColors,
+    rimColor:  [0.95, 0.97, 1.0, 1.0],
+    specColor: [1.00, 1.00, 1.0, 1.0],
+    starColor: [stR, stG, stB, 0.34],
+  };
+}

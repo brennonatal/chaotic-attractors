@@ -9,9 +9,9 @@
 import * as THREE from "three";
 
 export class TrailField {
-  constructor(attractor, palette) {
+  constructor(attractor, scheme) {
     this.attractor = attractor;
-    this.palette = palette;
+    this.scheme = scheme;
     this.n = attractor.points;
     this.trailLength = attractor.trailLength;
 
@@ -44,16 +44,9 @@ export class TrailField {
     this.mesh = new THREE.LineSegments(geom, mat);
     this.mesh.frustumCulled = false;
 
-    // Per-particle base colour (cool→hot ramp across instances).
-    this._particleColors = new Float32Array(this.n * 3);
-    const cool = palette.cool;
-    const hot = palette.hot;
-    for (let i = 0; i < this.n; i++) {
-      const t = this.n > 1 ? i / (this.n - 1) : 0;
-      this._particleColors[i * 3 + 0] = cool[0] * (1 - t) + hot[0] * t;
-      this._particleColors[i * 3 + 1] = cool[1] * (1 - t) + hot[1] * t;
-      this._particleColors[i * 3 + 2] = cool[2] * (1 - t) + hot[2] * t;
-    }
+    // Per-particle base colour comes straight from the scheme (one vivid
+    // hue per particle, golden-angle spaced).
+    this._particleColors = new Float32Array(scheme.particleColors);
   }
 
   update() {

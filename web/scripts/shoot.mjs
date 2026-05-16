@@ -45,19 +45,34 @@ const page = await context.newPage();
 page.on("console", (msg) => console.log(`[page:${msg.type()}] ${msg.text()}`));
 page.on("pageerror", (err) => console.error(`[page error] ${err.message}`));
 
-// Capture several attractors so the user gets a sense of how the
-// sphere-impostor shader reads across different cloud shapes.
-const shots = [
-  { idx: 0, name: "01_idx0_top_lambda.png", warm: 2500 },
-  { idx: 1, name: "02_idx1.png", warm: 3500 },
-  { idx: 2, name: "03_idx2.png", warm: 3500 },
-  { idx: 6, name: "04_idx6.png", warm: 3500 },
-];
-for (const s of shots) {
-  await page.goto(`http://localhost:5173/?index=${s.idx}`, { waitUntil: "networkidle" });
-  await wait(s.warm);
-  await page.screenshot({ path: `${OUT}${s.name}`, omitBackground: false });
-  console.log(`captured ${s.name}`);
+// Capture a few attractors with vivid colours, plus exercise the
+// keyboard navigation: load idx=1, then press ArrowRight twice to verify
+// the cycling actually swaps attractors live.
+await page.goto("http://localhost:5173/?index=1", { waitUntil: "networkidle" });
+await wait(3500);
+await page.screenshot({ path: `${OUT}01_initial_idx1.png` });
+console.log("captured 01_initial_idx1.png");
+
+await page.keyboard.press("ArrowRight");
+await wait(3500);
+await page.screenshot({ path: `${OUT}02_after_right.png` });
+console.log("captured 02_after_right.png");
+
+await page.keyboard.press("ArrowRight");
+await wait(3500);
+await page.screenshot({ path: `${OUT}03_after_right_again.png` });
+console.log("captured 03_after_right_again.png");
+
+await page.keyboard.press("p");
+await wait(3500);
+await page.screenshot({ path: `${OUT}04_after_p_reroll.png` });
+console.log("captured 04_after_p_reroll.png");
+
+for (const idx of [0, 5, 10]) {
+  await page.goto(`http://localhost:5173/?index=${idx}`, { waitUntil: "networkidle" });
+  await wait(3500);
+  await page.screenshot({ path: `${OUT}10_idx${idx}.png` });
+  console.log(`captured 10_idx${idx}.png`);
 }
 
 await browser.close();
