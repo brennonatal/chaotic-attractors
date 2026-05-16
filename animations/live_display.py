@@ -173,14 +173,14 @@ class LiveDisplay:
         self.view.camera = scene.TurntableCamera(up="z", fov=42, elevation=24, azimuth=35)
         self.view.camera.interactive = False
 
-        # Glow is a separate low-alpha line pass. Vectorized buffers keep this cheap.
-        self.glow_line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=glow_width)
-        self.line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=1.2)
+        # A faint glow underlay keeps trails from aliasing into pixel grit, but
+        # it's deliberately weak so trails read as motion blur, not neon tube.
+        self.glow_line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=max(1.6, glow_width * 0.45))
+        self.line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=1.4)
         self.stars = scene.visuals.Markers(parent=self.view.scene)
-        self.outer_halo = scene.visuals.Markers(parent=self.view.scene)
-        self.inner_halo = scene.visuals.Markers(parent=self.view.scene)
-        self.spark = scene.visuals.Markers(parent=self.view.scene)
+        self.shadow = scene.visuals.Markers(parent=self.view.scene)
         self.core = scene.visuals.Markers(parent=self.view.scene)
+        self.highlight = scene.visuals.Markers(parent=self.view.scene)
         self.title = scene.visuals.Text(
             "",
             parent=self.canvas.scene,
@@ -458,20 +458,23 @@ class LiveDisplay:
         ghost = palette_array(palette.ghost)[None, None, :]
 
         body = cool * (1.0 - phase) + hot * phase
-        excitation = np.clip(0.10 + 0.54 * speed + 0.30 * curvature + 0.14 * depth, 0.0, 1.0)
-        color = body * (1.0 - excitation) + head * excitation
+        # Subtle head-tint along very fast / very curved segments only —
+        # enough to add motion clarity, not enough to make the trail glow.
+        accent = np.clip(0.14 * speed + 0.08 * curvature, 0.0, 0.28)
+        color = body * (1.0 - accent) + head * accent
         ghost_mix = np.power(age, 0.95)
         color = color * (1.0 - ghost_mix) + ghost * ghost_mix
         # Exponential fade reads as a true "fading trail" — old segments
         # disappear instead of lingering as low-alpha smudges. Fast particles
         # keep slightly longer tails, so velocity becomes legible in the trail.
         fade = np.exp(-age * (2.6 - 0.95 * speed))
-        color[:, :, 3:4] *= fade * (0.46 + 0.54 * speed) * (0.68 + 0.35 * depth)
+        color[:, :, 3:4] *= fade * (0.40 + 0.34 * speed) * (0.62 + 0.32 * depth)
         color = np.clip(color, 0.0, 1.0).astype(np.float32)
         colors = np.repeat(color[:, :, None, :], 2, axis=2).reshape(-1, 4)
 
+        # Faint underlay just to soften the line; not a luminous halo any more.
         glow = colors.copy()
-        glow[:, 3] *= 0.24
+        glow[:, 3] *= 0.08
         self.glow_line_visual.set_data(pos=pos, color=glow, connect="segments")
         self.line_visual.set_data(pos=pos, color=colors, connect="segments")
 
@@ -480,31 +483,37 @@ class LiveDisplay:
         head_depth = 0.5 + 0.5 * np.tanh((self.states[:, 2] - self.center[2]) / max(self.display_scale * 0.42, 1e-6))
         phase_1d = np.linspace(0.0, 1.0, self.points, dtype=np.float32)[:, None]
         body_head = palette_array(palette.cool) * (1.0 - phase_1d) + palette_array(palette.hot) * phase_1d
-        excite = np.clip(0.22 + 0.58 * head_speed[:, None] + 0.26 * head_curve[:, None], 0.0, 1.0)
-        core_colors = body_head * (1.0 - excite) + palette_array(palette.head) * excite
-        core_colors[:, 3] = 0.88 + 0.12 * head_speed
+        # Slight self-shadow / lit-side modulation: depth darkens the back side,
+        # speed adds a touch of warmth. No more excitation-to-head pump that
+        # made fast particles read as neon lights.
+        shade = (0.72 + 0.28 * head_depth[:, None]).astype(np.float32)
+        warmth = 0.08 * head_speed[:, None]
+        core_colors = body_head * shade + palette_array(palette.head) * warmth
+        core_colors[:, 3] = 0.96
 
-        spark_colors = palette_array(palette.head) * 0.72 + core_colors * 0.28
-        spark_colors[:, 3] = np.clip(0.34 + 0.46 * head_speed + 0.24 * head_curve, 0.0, 0.92)
+        # Specular pinprick — small, dim white hint at the centre of the body.
+        # Reads as the lit side of a sphere rather than a luminous spark.
+        highlight_colors = np.ones_like(core_colors) * np.array([0.96, 0.97, 1.00, 1.0], dtype=np.float32)
+        highlight_colors[:, 3] = np.clip(0.20 + 0.18 * head_depth + 0.10 * head_speed, 0.0, 0.55)
 
-        inner_halo_colors = core_colors.copy()
-        inner_halo_colors[:, 3] = np.clip(0.11 + 0.23 * head_speed + 0.16 * head_curve, 0.0, 0.55)
-        outer_halo_colors = core_colors.copy()
-        outer_halo_colors[:, 3] = np.clip(0.025 + 0.11 * head_speed + 0.08 * head_curve, 0.0, 0.28)
+        # A soft drop-shadow disc gives the particle volume without glowing.
+        shadow_colors = (core_colors * np.array([0.10, 0.10, 0.10, 1.0], dtype=np.float32))
+        shadow_colors[:, 3] = np.clip(0.18 + 0.10 * head_depth, 0.0, 0.40)
 
-        # Fewer particles, but each reads as a luminous body: large soft aura,
-        # tight inner glow, bright spark, then a crisp core with a subtle rim.
-        core_sizes = (6.0 + 9.5 * head_speed + 3.8 * head_curve + 1.8 * head_depth).astype(np.float32)
-        spark_sizes = (2.5 + 3.7 * head_speed + 2.4 * head_curve).astype(np.float32)
-        inner_halo_sizes = (21.0 + 43.0 * head_speed + 26.0 * head_curve + 7.0 * head_depth).astype(np.float32)
-        outer_halo_sizes = (48.0 + 92.0 * head_speed + 44.0 * head_curve + 14.0 * head_depth).astype(np.float32)
-        rim_colors = np.clip(core_colors * np.array([1.05, 1.05, 1.05, 0.44], dtype=np.float32), 0.0, 1.0)
+        # Fixed-ish sizes with mild depth perspective. Speed contributes only a
+        # whisper — particles are solids, not balloons that swell when they
+        # accelerate.
+        core_sizes = (8.0 + 1.6 * head_speed + 3.2 * head_depth).astype(np.float32)
+        highlight_sizes = (core_sizes * 0.32).astype(np.float32)
+        shadow_sizes = (core_sizes * 1.55 + 1.2).astype(np.float32)
+        # Darker rim around the body sells the spherical read.
+        rim_colors = np.clip(core_colors * np.array([0.28, 0.28, 0.30, 1.0], dtype=np.float32), 0.0, 1.0)
+        rim_colors[:, 3] = 0.95
 
         states = self.states.astype(np.float32)
-        self.outer_halo.set_data(states, edge_color=None, face_color=np.clip(outer_halo_colors, 0.0, 1.0), size=outer_halo_sizes, symbol="disc")
-        self.inner_halo.set_data(states, edge_color=None, face_color=np.clip(inner_halo_colors, 0.0, 1.0), size=inner_halo_sizes, symbol="disc")
-        self.spark.set_data(states, edge_color=None, face_color=np.clip(spark_colors, 0.0, 1.0), size=spark_sizes, symbol="disc")
+        self.shadow.set_data(states, edge_color=None, face_color=np.clip(shadow_colors, 0.0, 1.0), size=shadow_sizes, symbol="disc")
         self.core.set_data(states, edge_color=rim_colors, face_color=np.clip(core_colors, 0.0, 1.0), size=core_sizes, symbol="disc")
+        self.highlight.set_data(states, edge_color=None, face_color=np.clip(highlight_colors, 0.0, 1.0), size=highlight_sizes, symbol="disc")
 
     def update_hud(self) -> None:
         if not self.show_hud:
