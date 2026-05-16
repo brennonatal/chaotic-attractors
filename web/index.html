@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chaotic Attractors — Live Display</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #0b0a10;
+        overflow: hidden;
+        font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+        color: #dde2ec;
+      }
+      #app {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #hud {
+        position: fixed;
+        left: 28px;
+        top: 28px;
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        color: rgba(220, 226, 240, 0.62);
+        pointer-events: none;
+        user-select: none;
+        mix-blend-mode: screen;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="app"></canvas>
+    <div id="hud"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
