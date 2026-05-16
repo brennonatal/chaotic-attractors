@@ -49,9 +49,10 @@ export class Attractor {
     this.coeffs = entry.coeffs;             // (3, 10)
     this.initialState = entry.initialState; // [x0, y0, z0]
     this.points = preset.points;
+    this.trailLength = preset.trailLength;
     this.dt = preset.dt;
 
-    this.velocityGain = 1.28;
+    this.velocityGain = 0.85;
     this.gravityStrength = 0.12;
     this.proximityGain = 0.85;
 
@@ -90,6 +91,12 @@ export class Attractor {
       this.baseSpeed[i] = 0.84 + this.rng() * (1.52 - 0.84);
     }
 
+    // Trails as a ring buffer: (trailLength, n, 3). One sample row written per
+    // RK4 step. Rendering walks backwards from trailHead to fill segments.
+    this.trails = new Float32Array(this.trailLength * n * 3);
+    this.trailHead = 0;
+    this.trailFill = 0;
+
     this._k1 = new Float32Array(n * 3);
     this._k2 = new Float32Array(n * 3);
     this._k3 = new Float32Array(n * 3);
@@ -103,8 +110,7 @@ export class Attractor {
 
     this.simTick = 0;
     this._fitFraming();
-    // _warmupAndFitFraming() will be re-enabled once trails are in: without
-    // trails the visited bbox leaves the instantaneous cluster looking tiny.
+    this._warmupAndFitFraming();
   }
 
   _updateGravityCoupling() {
@@ -290,21 +296,43 @@ export class Attractor {
       const dx = x - cx0, dy = y - cy0, dz = z - cz0;
       const inBounds = finite && (dx * dx + dy * dy + dz * dz) < bndSq;
       if (!inBounds) {
-        next[i * 3 + 0] = this.initialState[0] + gauss(this.rng) * this.jitter;
-        next[i * 3 + 1] = this.initialState[1] + gauss(this.rng) * this.jitter;
-        next[i * 3 + 2] = this.initialState[2] + gauss(this.rng) * this.jitter;
+        const rx = this.initialState[0] + gauss(this.rng) * this.jitter;
+        const ry = this.initialState[1] + gauss(this.rng) * this.jitter;
+        const rz = this.initialState[2] + gauss(this.rng) * this.jitter;
+        next[i * 3 + 0] = rx;
+        next[i * 3 + 1] = ry;
+        next[i * 3 + 2] = rz;
         this.prevVelocity[i * 3 + 0] = 0;
         this.prevVelocity[i * 3 + 1] = 0;
         this.prevVelocity[i * 3 + 2] = 0;
         this.speedEma[i] = 0;
         this.currentSpeedNorm[i] = 0;
         this.currentCurvatureNorm[i] = 0;
+        // Clear this particle's trail history so the divergence jump doesn't
+        // draw a long spike from its last in-bounds sample to the reset point.
+        const tl = this.trailLength;
+        for (let t = 0; t < tl; t++) {
+          const off = (t * n + i) * 3;
+          this.trails[off + 0] = rx;
+          this.trails[off + 1] = ry;
+          this.trails[off + 2] = rz;
+        }
       }
     }
 
     this.states = next;
     this.statesNext = old;
     this.simTick++;
+    this._appendTrailSample();
+  }
+
+  _appendTrailSample() {
+    // Write the current cloud into trails[trailHead, :, :] (one row, n*3 floats).
+    // No shifting required — the renderer reads modulo trailLength.
+    const n = this.points;
+    this.trails.set(this.states, this.trailHead * n * 3);
+    this.trailHead = (this.trailHead + 1) % this.trailLength;
+    if (this.trailFill < this.trailLength) this.trailFill++;
   }
 
   _fitFraming() {
@@ -346,14 +374,22 @@ export class Attractor {
       }
     }
 
-    // Restore the cloud to its initial seeded state and clear the velocity /
-    // speed-EMA trackers so the rendered run starts fresh.
-    this.states.set(initialStates);
+    // KEEP the post-warmup states. The cloud is now somewhere on the strange
+    // attractor instead of clustered at the seed point, which means the very
+    // first rendered frame already shows the cloud doing its thing — matching
+    // the framing we just fitted. (Python starts fresh from initial because
+    // its trails fill the visited region; we don't have that luxury until
+    // the user has waited a full trail-length.) Reset the visual trackers
+    // and trail buffer so nothing from the warmup leaks into the render.
     this.simTick = 0;
     this.prevVelocity.fill(0);
     this.speedEma.fill(0);
     this.currentSpeedNorm.fill(0);
     this.currentCurvatureNorm.fill(0);
+    this.trails.fill(0);
+    this.trailHead = 0;
+    this.trailFill = 0;
+    void initialStates;
 
     const rx = Math.max(maxX - minX, MIN_BBOX_RANGE);
     const ry = Math.max(maxY - minY, MIN_BBOX_RANGE);

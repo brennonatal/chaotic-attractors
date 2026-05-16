@@ -117,7 +117,7 @@ export class ParticleField {
     // Particle radius is a fraction of the attractor's display scale, so
     // spheres read at the same screen size regardless of how big the
     // underlying coordinate range happens to be.
-    this.baseRadius = Math.max(attractor.displayScale * 0.013, 0.05);
+    this.baseRadius = Math.max(attractor.displayScale * 0.018, 0.06);
 
     this.material = new THREE.ShaderMaterial({
       glslVersion: THREE.GLSL3,

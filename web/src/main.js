@@ -1,6 +1,13 @@
 import * as THREE from "three";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+
 import { Attractor, loadEntries } from "./attractor.js";
 import { ParticleField } from "./particles.js";
+import { TrailField } from "./trails.js";
+import { StarField } from "./starfield.js";
 import { PALETTES } from "./palettes.js";
 import { QUALITY_PRESETS, DEFAULT_QUALITY } from "./config.js";
 
@@ -18,6 +25,8 @@ async function main() {
   const canvas = document.getElementById("app");
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.1;
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(palette.background[0], palette.background[1], palette.background[2]);
@@ -28,9 +37,27 @@ async function main() {
   const params = new URLSearchParams(window.location.search);
   const startIndex = Math.max(0, Math.min(entries.length - 1, parseInt(params.get("index") ?? "0", 10) || 0));
   const entry = entries[startIndex];
+
   const attractor = new Attractor(entry, preset);
   const particles = new ParticleField(attractor, palette);
+  const trails = new TrailField(attractor, palette);
+  const stars = new StarField(attractor, palette, preset.starCount);
+  scene.add(stars.mesh);
+  scene.add(trails.mesh);
   scene.add(particles.mesh);
+
+  // Post-processing: bloom for the cinematic glow, OutputPass for tone mapping
+  // + sRGB encode at the very end of the pipeline.
+  const composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  const bloomPass = new UnrealBloomPass(
+    new THREE.Vector2(window.innerWidth, window.innerHeight),
+    0.55,   // strength — subtle, not neon
+    0.35,   // radius   — tight kernel keeps single-pixel halos round
+    0.0,    // threshold — bloom everything
+  );
+  composer.addPass(bloomPass);
+  composer.addPass(new OutputPass());
 
   const hud = document.getElementById("hud");
   hud.textContent =
@@ -44,6 +71,8 @@ async function main() {
     const h = window.innerHeight;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(w, h, false);
+    composer.setSize(w, h);
+    bloomPass.setSize(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   }
@@ -52,12 +81,13 @@ async function main() {
   function loop() {
     for (let i = 0; i < preset.stepsPerFrame; i++) attractor.step();
     particles.update();
+    trails.update();
 
     const t = frame / 60;
     attractor.orbitCamera(camera, t);
     particles.updatePerFrameUniforms(camera);
 
-    renderer.render(scene, camera);
+    composer.render();
     frame++;
     requestAnimationFrame(loop);
   }
