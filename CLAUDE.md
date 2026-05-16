@@ -13,8 +13,9 @@ uv venv --python 3.11                         # project environment
 uv pip install --python .venv/bin/python -e .    # editable install
 uv run python search.py --n 1000 --le-min 0.05   # discover new attractors → discovered.jsonl
 uv run python -m animations.explore              # cycle through discoveries with ← / →
-uv run python -m animations.live_display         # polished fullscreen/gallery display
-uv run python -m animations.live_display --windowed  # windowed dev mode
+uv run python -m animations.live_display         # polished fullscreen/gallery display, cinema preset
+uv run python -m animations.live_display --quality balanced --windowed  # lighter dev mode
+uv run python -m animations.live_display --quality ultra  # maximum quality preset
 uv run python -m animations.lorenz_3d            # canonical Lorenz, vispy
 uv run python animations/lorenz_2d.py            # canonical Lorenz, pygame 2D projection
 uv run python animations/random_2d.py            # 2D quadratic-map search (older sibling of search.py)
@@ -64,7 +65,7 @@ All three vispy/pygame scripts consume `Attractors/` rather than re-deriving dyn
 - `lorenz_3d.py` — vispy turntable with multi-particle Euler integration of `LorenzAttractor.next_state`. Trails are rendered as fading line segments.
 - `lorenz_2d.py` — pygame 2D projection, z used for brightness + line-thickness depth cues, also driven by `LorenzAttractor.next_state`.
 - `explore.py` — **the seed-browsing UI**. Reads `discovered.jsonl`, instantiates each survivor as a `RandomPolynomial3D(seed=...)`, animates it with scatter + deque-trail visuals. Keys: `← / →` navigate, `space` resets the particle cloud, `q / Esc` quit.
-- `live_display.py` — **the polished fullscreen/gallery UI**. Sorts discoveries by Lyapunov exponent, runs vectorized RK4 integration for smoother motion, renders glowing particle heads plus velocity-reactive gradient trail segments, rotates the camera slowly, cycles attractors automatically, and supports curated palettes. Keys: `f` fullscreen, `← / →` navigate, `space` pause, `r` reset, `p` palette, `+ / -` velocity, `h` HUD, `q / Esc` quit.
+- `live_display.py` — **the polished fullscreen/gallery UI**. Sorts discoveries by Lyapunov exponent, runs vectorized RK4 integration with numpy trail buffers and substep trail sampling for more fluid motion, renders a soft glow underlay plus crisp velocity/curvature/depth-reactive trail segments, uses zoom-only dynamic fitting to keep visible trails/particles inside the canvas, adds subtle starfield depth, rotates the camera slowly, cycles attractors automatically, supports `balanced`/`cinema`/`ultra` quality presets, and uses modern Pantone-inspired palettes (Mocha/Very Peri, Peach/ink, Viva Magenta/cyan, etc.). Keys: `f` fullscreen, `← / →` navigate, `space` pause, `r` reset, `p` palette, `+ / -` flow speed, `h` HUD, `q / Esc` quit.
 - `random_2d.py` — older standalone script that does the same random-search idea but for 2D *discrete maps* (not ODEs). Self-contained; kept for the 2D aesthetic it produces. Not integrated with `BaseChaoticAttractor` because the discrete-map case doesn't fit that interface.
 
 ## Conventions

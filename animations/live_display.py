@@ -2,7 +2,8 @@
 
 This is the gallery-mode sibling of ``animations.explore``: fewer controls,
 more polish. It reads seeds from ``discovered.jsonl``, cycles through the best
-systems, and renders smooth particle trails with curated dark palettes.
+systems, and renders smooth particle trails with a modern, Pantone-inspired
+color language.
 
 Controls:
     f           toggle fullscreen
@@ -10,7 +11,7 @@ Controls:
     space       pause / resume
     r           reset the current attractor
     p           switch color palette
-    + / -       increase / decrease dynamic velocity
+    + / -       increase / decrease flow speed
     h           toggle the minimal HUD
     q / Esc     quit
 """
@@ -22,7 +23,6 @@ import json
 import math
 import sys
 import time
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,14 +32,18 @@ from vispy import app, scene
 from Attractors import RandomPolynomial3D
 
 
-
 DEFAULT_PATH = "discovered.jsonl"
-DEFAULT_POINTS = 240
-DEFAULT_TRAIL_LENGTH = 180
-DEFAULT_DT = 0.004
-DEFAULT_STEPS_PER_FRAME = 4
 BOUND = 1e5
 MIN_BBOX_RANGE = 1e-6
+QUALITY_PRESETS = {
+    # points, trail, dt, steps, stars, glow_width
+    # Deliberately lower particle counts: spend the budget on richer particles,
+    # longer trails, and cleaner motion instead of noisy quantity.
+    "balanced": (21, 320, 0.0030, 5, 45, 4.4),
+    "cinema": (33, 420, 0.0026, 6, 80, 6.0),
+    "ultra": (55, 520, 0.0022, 7, 120, 7.2),
+}
+DEFAULT_QUALITY = "cinema"
 
 
 @dataclass(frozen=True)
@@ -51,59 +55,37 @@ class Palette:
     hot: tuple[float, float, float, float]
     cool: tuple[float, float, float, float]
     ghost: tuple[float, float, float, float]
+    star: tuple[float, float, float, float]
 
 
+def hex_color(value: str, alpha: float = 1.0) -> tuple[float, float, float, float]:
+    """Convert a Pantone-style hex reference into VisPy RGBA floats."""
+    value = value.removeprefix("#")
+    return (int(value[0:2], 16) / 255, int(value[2:4], 16) / 255, int(value[4:6], 16) / 255, alpha)
+
+
+# Pantone-inspired pairings. One quiet dark ground, one warm accent, one cool
+# counterpoint, and one bright head. This avoids cheap rainbow visuals.
 PALETTES = [
-    Palette(
-        name="aurora",
-        background=(0.006, 0.010, 0.025, 1.0),
-        fog=(0.020, 0.030, 0.070, 0.18),
-        head=(0.78, 1.00, 0.94, 0.98),
-        hot=(0.80, 0.32, 1.00, 0.72),
-        cool=(0.08, 0.78, 1.00, 0.62),
-        ghost=(0.03, 0.04, 0.08, 0.00),
-    ),
-    Palette(
-        name="ember tide",
-        background=(0.020, 0.010, 0.006, 1.0),
-        fog=(0.075, 0.025, 0.012, 0.16),
-        head=(1.00, 0.86, 0.58, 0.98),
-        hot=(1.00, 0.28, 0.16, 0.74),
-        cool=(0.96, 0.58, 0.18, 0.56),
-        ghost=(0.08, 0.03, 0.01, 0.00),
-    ),
-    Palette(
-        name="glacier",
-        background=(0.004, 0.012, 0.018, 1.0),
-        fog=(0.010, 0.045, 0.065, 0.18),
-        head=(0.88, 0.98, 1.00, 0.98),
-        hot=(0.45, 0.92, 1.00, 0.70),
-        cool=(0.20, 0.46, 1.00, 0.58),
-        ghost=(0.00, 0.02, 0.04, 0.00),
-    ),
-    Palette(
-        name="orchid noir",
-        background=(0.014, 0.008, 0.028, 1.0),
-        fog=(0.045, 0.020, 0.090, 0.17),
-        head=(0.98, 0.88, 1.00, 0.98),
-        hot=(1.00, 0.38, 0.76, 0.72),
-        cool=(0.40, 0.52, 1.00, 0.58),
-        ghost=(0.03, 0.01, 0.07, 0.00),
-    ),
+    Palette("mocha periwinkle", hex_color("0B0A10"), hex_color("2A1E22", 0.14), hex_color("F7E1D2", 0.98), hex_color("A47864", 0.76), hex_color("6667AB", 0.66), hex_color("0B0A10", 0.00), hex_color("F2D8C2", 0.22)),
+    Palette("peach ink", hex_color("080A12"), hex_color("281B25", 0.15), hex_color("FFE4D6", 0.98), hex_color("FFBE98", 0.78), hex_color("5B7C99", 0.64), hex_color("080A12", 0.00), hex_color("FFD6BF", 0.20)),
+    Palette("viva cyan", hex_color("0A0710"), hex_color("2B0E22", 0.16), hex_color("FDE7F0", 0.98), hex_color("BB2649", 0.78), hex_color("00A6A6", 0.64), hex_color("0A0710", 0.00), hex_color("F4A3B7", 0.20)),
+    Palette("serenity coral", hex_color("071018"), hex_color("10253A", 0.15), hex_color("F4FBFF", 0.98), hex_color("F7786B", 0.76), hex_color("92A8D1", 0.66), hex_color("071018", 0.00), hex_color("C9D8F2", 0.19)),
+    Palette("greenery ultraviolet", hex_color("070C09"), hex_color("102618", 0.14), hex_color("F4FFE8", 0.98), hex_color("88B04B", 0.76), hex_color("5F4B8B", 0.66), hex_color("070C09", 0.00), hex_color("D9F2B4", 0.18)),
 ]
 
 
 def load_discovered(path: str | Path) -> list[dict]:
     path = Path(path)
     if not path.exists():
-        print(f"No {path} found. Run `python search.py` first.", file=sys.stderr)
+        print(f"No {path} found. Run `uv run python search.py` first.", file=sys.stderr)
         sys.exit(1)
 
     with path.open() as f:
         entries = [json.loads(line) for line in f if line.strip()]
 
     if not entries:
-        print(f"{path} is empty. Run `python search.py` first.", file=sys.stderr)
+        print(f"{path} is empty. Run `uv run python search.py` first.", file=sys.stderr)
         sys.exit(1)
 
     return entries
@@ -118,12 +100,21 @@ def bbox_center_and_scale(bbox: list[list[float]]) -> tuple[np.ndarray, float]:
     return center, scale
 
 
-def lerp_color(a: tuple[float, ...], b: tuple[float, ...], t: float) -> tuple[float, float, float, float]:
-    return tuple((1.0 - t) * x + t * y for x, y in zip(a, b))  # type: ignore[return-value]
+def palette_array(color: tuple[float, float, float, float]) -> np.ndarray:
+    return np.asarray(color, dtype=np.float32)
 
 
 def clamp_color(color: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
     return tuple(max(0.0, min(1.0, component)) for component in color)  # type: ignore[return-value]
+
+
+def segment_indices(visible_len: int) -> np.ndarray:
+    """Dense head + progressively decimated tail: smooth where the eye tracks."""
+    max_start = max(1, visible_len - 1)
+    head = np.arange(0, min(92, max_start), 1)
+    body = np.arange(min(92, max_start), min(190, max_start), 2)
+    tail = np.arange(min(190, max_start), max_start, 4)
+    return np.concatenate((head, body, tail)).astype(np.int64)
 
 
 class LiveDisplay:
@@ -131,12 +122,15 @@ class LiveDisplay:
         self,
         entries: list[dict],
         *,
-        points: int = DEFAULT_POINTS,
-        trail_length: int = DEFAULT_TRAIL_LENGTH,
-        dt: float = DEFAULT_DT,
-        steps_per_frame: int = DEFAULT_STEPS_PER_FRAME,
+        points: int,
+        trail_length: int,
+        dt: float,
+        steps_per_frame: int,
+        star_count: int,
+        glow_width: float,
+        quality: str,
         auto_seconds: float = 45.0,
-        velocity_gain: float = 1.0,
+        velocity_gain: float = 1.28,
         start_index: int = 0,
         fullscreen: bool = True,
         size: tuple[int, int] = (1600, 1000),
@@ -147,6 +141,8 @@ class LiveDisplay:
         self.trail_length = trail_length
         self.dt = dt
         self.steps_per_frame = steps_per_frame
+        self.star_count = star_count
+        self.quality = quality
         self.auto_seconds = auto_seconds
         self.velocity_gain = velocity_gain
         self.idx = start_index % len(entries)
@@ -155,6 +151,8 @@ class LiveDisplay:
         self.show_hud = show_hud
         self.last_switch = time.monotonic()
         self.frame = 0
+        self.sim_tick = 0
+        self.warmup_len = 1
 
         palette = self.palette
         self.canvas = scene.SceneCanvas(
@@ -166,16 +164,21 @@ class LiveDisplay:
             title="Chaotic Attractors — Live Display",
         )
         self.view = self.canvas.central_widget.add_view()
-        self.view.camera = scene.TurntableCamera(up="z", fov=46, elevation=24, azimuth=35)
+        self.view.camera = scene.TurntableCamera(up="z", fov=42, elevation=24, azimuth=35)
         self.view.camera.interactive = False
 
-        self.line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=1.35)
-        self.scatter = scene.visuals.Markers(parent=self.view.scene)
-        self.halo = scene.visuals.Markers(parent=self.view.scene)
+        # Glow is a separate low-alpha line pass. Vectorized buffers keep this cheap.
+        self.glow_line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=glow_width)
+        self.line_visual = scene.visuals.Line(method="gl", parent=self.view.scene, width=1.2)
+        self.stars = scene.visuals.Markers(parent=self.view.scene)
+        self.outer_halo = scene.visuals.Markers(parent=self.view.scene)
+        self.inner_halo = scene.visuals.Markers(parent=self.view.scene)
+        self.spark = scene.visuals.Markers(parent=self.view.scene)
+        self.core = scene.visuals.Markers(parent=self.view.scene)
         self.title = scene.visuals.Text(
             "",
             parent=self.canvas.scene,
-            color=(0.86, 0.92, 1.00, 0.70),
+            color=(0.86, 0.90, 0.96, 0.64),
             font_size=12,
             pos=(28, 32),
             anchor_x="left",
@@ -200,58 +203,98 @@ class LiveDisplay:
         self.bounds = self.display_scale * 2.6 + 2.0
 
         rng = np.random.default_rng(entry["seed"] + self.points)
-        initial = np.asarray(self.attractor.initial_state, dtype=np.float64)
-        jitter = max(self.display_scale * 0.0009, 0.006)
-        self.states = initial + rng.normal(0.0, jitter, size=(self.points, 3))
-        self.trails = [deque(maxlen=self.trail_length) for _ in range(self.points)]
-        self.trail_speeds = [deque(maxlen=self.trail_length) for _ in range(self.points)]
+        self.initial_origin = np.asarray(self.attractor.initial_state, dtype=np.float64)
+        self.jitter = max(self.display_scale * 0.0012, 0.008)
+        self.states = self.initial_origin + rng.normal(0.0, self.jitter, size=(self.points, 3))
+        self.trails = np.repeat(self.states[:, None, :], self.trail_length, axis=1).astype(np.float32)
+        self.trail_speeds = np.zeros((self.points, self.trail_length), dtype=np.float32)
+        self.trail_curvature = np.zeros((self.points, self.trail_length), dtype=np.float32)
+        self.prev_velocity = np.zeros((self.points, 3), dtype=np.float64)
         self.speed_phase = rng.uniform(0.0, math.tau, size=self.points)
-        self.base_speed = rng.uniform(0.72, 1.34, size=self.points)
+        self.base_speed = rng.uniform(0.84, 1.52, size=self.points)
         self.speed_ema = np.zeros(self.points, dtype=np.float64)
         self.current_speed_norm = np.zeros(self.points, dtype=np.float64)
-        # Deques start empty intentionally; they bloom into trails over the first seconds.
+        self.current_curvature_norm = np.zeros(self.points, dtype=np.float64)
+        self.star_positions = self.center + rng.uniform(-1.0, 1.0, size=(self.star_count, 3)) * self.display_scale * 1.65
+        self.star_sizes = rng.uniform(0.9, 2.8, size=self.star_count).astype(np.float32)
 
-        if reset_camera:
-            self.view.camera.center = tuple(self.center)
-            self.view.camera.scale_factor = self.display_scale * 1.55 + 1.0
+        self.precompute_camera_framing()
+        self.apply_camera_framing()
+        self.render_starfield()
 
         self.last_switch = time.monotonic()
         self.frame = 0
+        self.sim_tick = 0
+        self.warmup_len = 1
         self.update_hud()
         print(
             f"[{self.idx + 1}/{len(self.entries)}] seed={entry['seed']}  "
-            f"λ={entry['lyapunov']:.3f}  palette={self.palette.name}"
+            f"λ={entry['lyapunov']:.3f}  palette={self.palette.name}  quality={self.quality}"
         )
+
+    def render_starfield(self) -> None:
+        palette = self.palette
+        colors = np.empty((self.star_count, 4), dtype=np.float32)
+        for i in range(self.star_count):
+            twinkle = 0.62 + 0.38 * math.sin(i * 12.9898 + self.frame * 0.005)
+            colors[i] = clamp_color((palette.star[0], palette.star[1], palette.star[2], palette.star[3] * twinkle))
+        self.stars.set_data(self.star_positions.astype(np.float32), edge_color=None, face_color=colors, size=self.star_sizes)
 
     def derivatives(self, states: np.ndarray) -> np.ndarray:
         x = states[:, 0]
         y = states[:, 1]
         z = states[:, 2]
-        basis = np.stack(
-            (np.ones_like(x), x, y, z, x * x, y * y, z * z, x * y, x * z, y * z),
-            axis=1,
-        )
-        return basis @ self.coeffs.T
+        xx = x * x
+        yy = y * y
+        zz = z * z
+        xy = x * y
+        xz = x * z
+        yz = y * z
+        out = np.empty_like(states)
+        for axis, coeff in enumerate(self.coeffs):
+            out[:, axis] = (
+                coeff[0]
+                + coeff[1] * x
+                + coeff[2] * y
+                + coeff[3] * z
+                + coeff[4] * xx
+                + coeff[5] * yy
+                + coeff[6] * zz
+                + coeff[7] * xy
+                + coeff[8] * xz
+                + coeff[9] * yz
+            )
+        return out
 
     def dynamic_timestep(self, tick: int) -> np.ndarray:
         """Per-particle timestep multiplier for alive, non-uniform motion."""
-        breath = 1.0 + 0.30 * np.sin(tick * 0.016 + self.speed_phase)
-        shimmer = 1.0 + 0.10 * np.sin(tick * 0.049 + self.speed_phase * 0.37)
-        return np.clip(self.dt * self.velocity_gain * self.base_speed * breath * shimmer, self.dt * 0.38, self.dt * 2.35)
+        breath = 1.0 + 0.30 * np.sin(tick * 0.007 + self.speed_phase)
+        pulse = 1.0 + 0.11 * np.sin(tick * 0.019 + self.speed_phase * 0.43)
+        micro = 1.0 + 0.035 * np.sin(tick * 0.043 + self.speed_phase * 1.71)
+        return np.clip(self.dt * self.velocity_gain * self.base_speed * breath * pulse * micro, self.dt * 0.45, self.dt * 2.25)
+
+    def integrate_states(self, states: np.ndarray, tick: int) -> np.ndarray:
+        h = self.dynamic_timestep(tick)[:, None]
+        k1 = self.derivatives(states)
+        k2 = self.derivatives(states + 0.5 * h * k1)
+        k3 = self.derivatives(states + 0.5 * h * k2)
+        k4 = self.derivatives(states + h * k3)
+        return states + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
     def rk4_step(self, tick: int) -> None:
         s = self.states
-        h = self.dynamic_timestep(tick)[:, None]
-        k1 = self.derivatives(s)
-        k2 = self.derivatives(s + 0.5 * h * k1)
-        k3 = self.derivatives(s + 0.5 * h * k2)
-        k4 = self.derivatives(s + h * k3)
-        new_states = s + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        new_states = self.integrate_states(s, tick)
 
-        raw_speed = np.log1p(np.linalg.norm(k1, axis=1) / self.display_scale)
-        self.speed_ema = self.speed_ema * 0.88 + raw_speed * 0.12
-        speed_ceiling = max(float(np.percentile(self.speed_ema, 92)), 1e-6)
+        velocity = new_states - s
+        raw_speed = np.log1p(np.linalg.norm(velocity, axis=1) / max(self.display_scale, 1e-6))
+        self.speed_ema = self.speed_ema * 0.84 + raw_speed * 0.16
+        speed_ceiling = max(float(np.percentile(self.speed_ema, 90)), 1e-6)
         self.current_speed_norm = np.clip(self.speed_ema / speed_ceiling, 0.0, 1.0)
+
+        cross = np.linalg.norm(np.cross(self.prev_velocity, velocity), axis=1)
+        denom = np.linalg.norm(self.prev_velocity, axis=1) * np.linalg.norm(velocity, axis=1) + 1e-9
+        self.current_curvature_norm = np.clip(cross / denom, 0.0, 1.0)
+        self.prev_velocity = velocity
 
         finite = np.all(np.isfinite(new_states), axis=1)
         near_center = np.linalg.norm(new_states - self.center, axis=1) < self.bounds
@@ -259,85 +302,166 @@ class LiveDisplay:
         if not np.all(valid):
             rng = np.random.default_rng(int(time.time() * 1000) % 2**32)
             count = int(np.count_nonzero(~valid))
-            new_states[~valid] = np.asarray(self.attractor.initial_state) + rng.normal(
-                0.0, max(self.display_scale * 0.001, 0.008), size=(count, 3)
-            )
-            for i, ok in enumerate(valid):
-                if not ok:
-                    self.trails[i].clear()
-                    self.trail_speeds[i].clear()
-                    self.speed_ema[i] = 0.0
-                    self.current_speed_norm[i] = 0.0
+            new_states[~valid] = np.asarray(self.attractor.initial_state) + rng.normal(0.0, max(self.display_scale * 0.0012, 0.008), size=(count, 3))
+            self.prev_velocity[~valid] = 0.0
+            self.speed_ema[~valid] = 0.0
+            self.current_speed_norm[~valid] = 0.0
+            self.current_curvature_norm[~valid] = 0.0
         self.states = new_states
 
+    def append_trail_samples(self) -> None:
+        # Vectorized trail buffer. This replaced Python deques so we can spend the
+        # frame budget on actual visual quality instead of object churn.
+        self.trails[:, 1:] = self.trails[:, :-1]
+        self.trail_speeds[:, 1:] = self.trail_speeds[:, :-1]
+        self.trail_curvature[:, 1:] = self.trail_curvature[:, :-1]
+        self.trails[:, 0] = self.states.astype(np.float32)
+        self.trail_speeds[:, 0] = self.current_speed_norm.astype(np.float32)
+        self.trail_curvature[:, 0] = self.current_curvature_norm.astype(np.float32)
+        self.warmup_len = min(self.trail_length, self.warmup_len + 1)
+
     def update(self, event) -> None:
-        if not self.paused:
-            tick_base = self.frame * self.steps_per_frame
-            for step in range(self.steps_per_frame):
-                self.rk4_step(tick_base + step)
+        if self.paused:
+            return
 
-            for i, state in enumerate(self.states):
-                self.trails[i].appendleft(state.copy())
-                self.trail_speeds[i].appendleft(float(self.current_speed_norm[i]))
+        for _ in range(self.steps_per_frame):
+            self.rk4_step(self.sim_tick)
+            self.append_trail_samples()
+            self.sim_tick += 1
 
-            self.frame += 1
-            self.update_camera_motion()
-            self.render_particles()
+        self.frame += 1
+        self.update_camera_motion()
+        if self.frame % 10 == 0:
+            self.render_starfield()
+        self.render_particles()
 
-            if self.auto_seconds > 0 and time.monotonic() - self.last_switch > self.auto_seconds:
-                self.next_attractor()
+        if self.auto_seconds > 0 and time.monotonic() - self.last_switch > self.auto_seconds:
+            self.next_attractor()
+
+    def precompute_camera_framing(self) -> None:
+        """Simulate the whole gallery interval before rendering and choose one static fit.
+
+        Live zoom correction looks nervous on a fullscreen display. Instead, use
+        the exact same integrator/timestep schedule ahead of time, measure the
+        bounds of every finite point that will be produced during the current
+        attractor interval, then keep the camera center and scale fixed while it
+        renders.
+        """
+        preview_frames = int((self.auto_seconds if self.auto_seconds > 0 else 45.0) * 60)
+        preview_steps = max(self.trail_length, preview_frames * self.steps_per_frame)
+        states = self.states.copy()
+        mins = np.min(states, axis=0)
+        maxs = np.max(states, axis=0)
+
+        reset_rng = np.random.default_rng(self.entries[self.idx]["seed"] + 7919)
+        for tick in range(preview_steps):
+            new_states = self.integrate_states(states, tick)
+            finite = np.all(np.isfinite(new_states), axis=1)
+            near_center = np.linalg.norm(new_states - self.center, axis=1) < self.bounds
+            valid = finite & near_center
+            if np.any(valid):
+                valid_states = new_states[valid]
+                mins = np.minimum(mins, np.min(valid_states, axis=0))
+                maxs = np.maximum(maxs, np.max(valid_states, axis=0))
+            if not np.all(valid):
+                count = int(np.count_nonzero(~valid))
+                new_states[~valid] = self.initial_origin + reset_rng.normal(0.0, self.jitter, size=(count, 3))
+            states = new_states
+
+        ranges = np.maximum(maxs - mins, MIN_BBOX_RANGE)
+        self.framing_center = (mins + maxs) / 2.0
+        max_axis = float(np.max(ranges))
+        diagonal_radius = float(np.linalg.norm(ranges) * 0.5)
+        self.framing_scale = max(
+            max_axis * 1.88 + 1.0,
+            diagonal_radius * 1.38 + 1.0,
+            self.display_scale * 1.45 + 1.0,
+        )
+        self.view.camera.center = tuple(self.framing_center)
+        self.view.camera.scale_factor = self.framing_scale
+
+    def apply_camera_framing(self) -> None:
+        self.view.camera.center = tuple(self.framing_center)
+        self.view.camera.scale_factor = self.framing_scale
 
     def update_camera_motion(self) -> None:
         t = self.frame / 60.0
-        self.view.camera.azimuth = 35 + t * 4.8
-        self.view.camera.elevation = 23 + math.sin(t * 0.19) * 7.0
-        self.view.camera.roll = math.sin(t * 0.11) * 1.5
+        self.view.camera.azimuth = 35 + t * 5.0
+        self.view.camera.elevation = 24 + math.sin(t * 0.15) * 7.0
+        self.view.camera.roll = math.sin(t * 0.09) * 1.8
+        # Keep FOV fixed. FOV breathing reads as zoom, and framing is now
+        # precomputed exactly before the first rendered frame.
+        self.view.camera.fov = 40
 
     def render_particles(self) -> None:
         palette = self.palette
+        idx = segment_indices(self.warmup_len)
+        if len(idx) == 0:
+            return
 
-        line_points: list[np.ndarray] = []
-        line_colors: list[tuple[float, float, float, float]] = []
-        for particle_idx, trail in enumerate(self.trails):
-            if len(trail) < 2:
-                continue
-            phase = particle_idx / max(1, self.points - 1)
-            body = lerp_color(palette.cool, palette.hot, phase)
-            for j in range(len(trail) - 1):
-                age = j / max(1, self.trail_length - 1)
-                speed = self.trail_speeds[particle_idx][j] if j < len(self.trail_speeds[particle_idx]) else 0.0
-                body_with_velocity = lerp_color(body, palette.head, 0.16 + 0.58 * speed)
-                color = lerp_color(body_with_velocity, palette.ghost, age**0.82)
-                alpha = max(0.0, color[3] * (1.0 - age) ** (0.48 + 0.24 * speed))
-                color = clamp_color((color[0], color[1], color[2], alpha * (0.62 + 0.55 * speed)))
-                line_points.append(trail[j])
-                line_points.append(trail[j + 1])
-                line_colors.append(color)
-                line_colors.append(color)
+        starts = self.trails[:, idx]
+        ends = self.trails[:, idx + 1]
+        pos = np.empty((self.points, len(idx), 2, 3), dtype=np.float32)
+        pos[:, :, 0] = starts
+        pos[:, :, 1] = ends
+        pos = pos.reshape(-1, 3)
 
-        if line_points:
-            self.line_visual.set_data(
-                pos=np.asarray(line_points, dtype=np.float32),
-                color=np.asarray(line_colors, dtype=np.float32),
-                connect="segments",
-            )
+        phase = np.linspace(0.0, 1.0, self.points, dtype=np.float32)[:, None, None]
+        age = (idx.astype(np.float32) / max(1, self.trail_length - 1))[None, :, None]
+        speed = self.trail_speeds[:, idx][:, :, None]
+        curvature = self.trail_curvature[:, idx][:, :, None]
+        depth = 0.5 + 0.5 * np.tanh((starts[:, :, 2:3] - self.center[2]) / max(self.display_scale * 0.42, 1e-6))
 
-        # Heads glow subtly: one large translucent halo plus one small crisp core.
-        head_colors = np.empty((self.points, 4), dtype=np.float32)
-        halo_colors = np.empty((self.points, 4), dtype=np.float32)
-        head_sizes = np.empty(self.points, dtype=np.float32)
-        halo_sizes = np.empty(self.points, dtype=np.float32)
-        for i in range(self.points):
-            phase = i / max(1, self.points - 1)
-            speed = float(self.current_speed_norm[i])
-            head = lerp_color(palette.head, palette.hot, min(1.0, 0.22 + speed * 0.78 + 0.18 * math.sin(phase * math.tau)))
-            head_colors[i] = clamp_color(head)
-            halo_colors[i] = clamp_color((head[0], head[1], head[2], 0.08 + 0.20 * speed))
-            head_sizes[i] = 3.6 + 5.4 * speed
-            halo_sizes[i] = 12.0 + 24.0 * speed
+        cool = palette_array(palette.cool)[None, None, :]
+        hot = palette_array(palette.hot)[None, None, :]
+        head = palette_array(palette.head)[None, None, :]
+        ghost = palette_array(palette.ghost)[None, None, :]
 
-        self.halo.set_data(self.states.astype(np.float32), edge_color=None, face_color=halo_colors, size=halo_sizes)
-        self.scatter.set_data(self.states.astype(np.float32), edge_color=None, face_color=head_colors, size=head_sizes)
+        body = cool * (1.0 - phase) + hot * phase
+        excitation = np.clip(0.10 + 0.54 * speed + 0.30 * curvature + 0.14 * depth, 0.0, 1.0)
+        color = body * (1.0 - excitation) + head * excitation
+        ghost_mix = np.power(age, 0.95)
+        color = color * (1.0 - ghost_mix) + ghost * ghost_mix
+        fade = np.power(1.0 - age, 0.74 + 0.16 * speed)
+        color[:, :, 3:4] *= fade * (0.46 + 0.54 * speed) * (0.68 + 0.35 * depth)
+        color = np.clip(color, 0.0, 1.0).astype(np.float32)
+        colors = np.repeat(color[:, :, None, :], 2, axis=2).reshape(-1, 4)
+
+        glow = colors.copy()
+        glow[:, 3] *= 0.24
+        self.glow_line_visual.set_data(pos=pos, color=glow, connect="segments")
+        self.line_visual.set_data(pos=pos, color=colors, connect="segments")
+
+        head_speed = self.current_speed_norm.astype(np.float32)
+        head_curve = self.current_curvature_norm.astype(np.float32)
+        head_depth = 0.5 + 0.5 * np.tanh((self.states[:, 2] - self.center[2]) / max(self.display_scale * 0.42, 1e-6))
+        phase_1d = np.linspace(0.0, 1.0, self.points, dtype=np.float32)[:, None]
+        body_head = palette_array(palette.cool) * (1.0 - phase_1d) + palette_array(palette.hot) * phase_1d
+        excite = np.clip(0.22 + 0.58 * head_speed[:, None] + 0.26 * head_curve[:, None], 0.0, 1.0)
+        core_colors = body_head * (1.0 - excite) + palette_array(palette.head) * excite
+        core_colors[:, 3] = 0.88 + 0.12 * head_speed
+
+        spark_colors = palette_array(palette.head) * 0.72 + core_colors * 0.28
+        spark_colors[:, 3] = np.clip(0.34 + 0.46 * head_speed + 0.24 * head_curve, 0.0, 0.92)
+
+        inner_halo_colors = core_colors.copy()
+        inner_halo_colors[:, 3] = np.clip(0.11 + 0.23 * head_speed + 0.16 * head_curve, 0.0, 0.55)
+        outer_halo_colors = core_colors.copy()
+        outer_halo_colors[:, 3] = np.clip(0.025 + 0.11 * head_speed + 0.08 * head_curve, 0.0, 0.28)
+
+        # Fewer particles, but each reads as a luminous body: large soft aura,
+        # tight inner glow, bright spark, then a crisp core with a subtle rim.
+        core_sizes = (6.0 + 9.5 * head_speed + 3.8 * head_curve + 1.8 * head_depth).astype(np.float32)
+        spark_sizes = (2.5 + 3.7 * head_speed + 2.4 * head_curve).astype(np.float32)
+        inner_halo_sizes = (21.0 + 43.0 * head_speed + 26.0 * head_curve + 7.0 * head_depth).astype(np.float32)
+        outer_halo_sizes = (48.0 + 92.0 * head_speed + 44.0 * head_curve + 14.0 * head_depth).astype(np.float32)
+        rim_colors = np.clip(core_colors * np.array([1.05, 1.05, 1.05, 0.44], dtype=np.float32), 0.0, 1.0)
+
+        states = self.states.astype(np.float32)
+        self.outer_halo.set_data(states, edge_color=None, face_color=np.clip(outer_halo_colors, 0.0, 1.0), size=outer_halo_sizes, symbol="disc")
+        self.inner_halo.set_data(states, edge_color=None, face_color=np.clip(inner_halo_colors, 0.0, 1.0), size=inner_halo_sizes, symbol="disc")
+        self.spark.set_data(states, edge_color=None, face_color=np.clip(spark_colors, 0.0, 1.0), size=spark_sizes, symbol="disc")
+        self.core.set_data(states, edge_color=rim_colors, face_color=np.clip(core_colors, 0.0, 1.0), size=core_sizes, symbol="disc")
 
     def update_hud(self) -> None:
         if not self.show_hud:
@@ -346,7 +470,8 @@ class LiveDisplay:
         entry = self.entries[self.idx]
         self.title.text = (
             f"CHAOTIC ATTRACTORS  ·  {self.idx + 1:02d}/{len(self.entries):02d}  "
-            f"seed {entry['seed']}  ·  λ {entry['lyapunov']:.3f}  ·  vel {self.velocity_gain:.2f}×  ·  {self.palette.name}"
+            f"seed {entry['seed']}  ·  λ {entry['lyapunov']:.3f}  ·  flow {self.velocity_gain:.2f}×  "
+            f"·  {self.quality}  ·  {self.palette.name}"
         )
 
     def next_attractor(self) -> None:
@@ -370,12 +495,17 @@ class LiveDisplay:
         elif key == "P":
             self.palette_idx = (self.palette_idx + 1) % len(PALETTES)
             self.canvas.bgcolor = self.palette.background
+            self.render_starfield()
             self.update_hud()
         elif key in ("+", "="):
-            self.velocity_gain = min(2.4, self.velocity_gain + 0.12)
+            self.velocity_gain = min(3.0, self.velocity_gain + 0.12)
+            self.precompute_camera_framing()
+            self.apply_camera_framing()
             self.update_hud()
         elif key in ("-", "_"):
-            self.velocity_gain = max(0.35, self.velocity_gain - 0.12)
+            self.velocity_gain = max(0.30, self.velocity_gain - 0.12)
+            self.precompute_camera_framing()
+            self.apply_camera_framing()
             self.update_hud()
         elif key == "H":
             self.show_hud = not self.show_hud
@@ -396,28 +526,39 @@ def sorted_entries(entries: list[dict]) -> list[dict]:
     return sorted(entries, key=lambda entry: float(entry.get("lyapunov", 0.0)), reverse=True)
 
 
+def quality_defaults(name: str) -> tuple[int, int, float, int, int, float]:
+    if name not in QUALITY_PRESETS:
+        raise ValueError(f"Unknown quality {name!r}; choose one of {', '.join(QUALITY_PRESETS)}")
+    return QUALITY_PRESETS[name]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--path", default=DEFAULT_PATH, help="JSONL file produced by search.py")
-    parser.add_argument("--points", type=int, default=DEFAULT_POINTS, help="number of live particles")
-    parser.add_argument("--trail", type=int, default=DEFAULT_TRAIL_LENGTH, help="trail length per particle")
-    parser.add_argument("--dt", type=float, default=DEFAULT_DT, help="RK4 integration timestep")
-    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS_PER_FRAME, help="integration steps per frame")
+    parser.add_argument("--quality", choices=tuple(QUALITY_PRESETS), default=DEFAULT_QUALITY, help="render quality preset")
+    parser.add_argument("--points", type=int, default=None, help="number of live particles")
+    parser.add_argument("--trail", type=int, default=None, help="trail length per particle")
+    parser.add_argument("--dt", type=float, default=None, help="RK4 integration timestep")
+    parser.add_argument("--steps", type=int, default=None, help="integration steps per frame")
     parser.add_argument("--auto-seconds", type=float, default=45.0, help="seconds before auto-advancing; 0 disables")
-    parser.add_argument("--velocity-gain", type=float, default=1.0, help="global multiplier for dynamic particle velocity")
+    parser.add_argument("--velocity-gain", type=float, default=1.28, help="global multiplier for dynamic particle flow")
     parser.add_argument("--index", type=int, default=0, help="start index after sorting by Lyapunov exponent")
     parser.add_argument("--windowed", action="store_true", help="start windowed instead of fullscreen")
     parser.add_argument("--no-hud", action="store_true", help="hide the minimal overlay text")
     args = parser.parse_args()
 
+    preset_points, preset_trail, preset_dt, preset_steps, preset_stars, preset_glow = quality_defaults(args.quality)
     entries = sorted_entries(load_discovered(args.path))
     print(f"Loaded {len(entries)} discovered attractors for live display.")
     display = LiveDisplay(
         entries,
-        points=args.points,
-        trail_length=args.trail,
-        dt=args.dt,
-        steps_per_frame=args.steps,
+        points=args.points or preset_points,
+        trail_length=args.trail or preset_trail,
+        dt=args.dt or preset_dt,
+        steps_per_frame=args.steps or preset_steps,
+        star_count=preset_stars,
+        glow_width=preset_glow,
+        quality=args.quality,
         auto_seconds=args.auto_seconds,
         velocity_gain=args.velocity_gain,
         start_index=args.index,
