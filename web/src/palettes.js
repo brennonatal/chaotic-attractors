@@ -1,12 +1,18 @@
 // Direct port of the Pantone-inspired palette set from animations/live_display.py.
-// Each colour is RGBA in [0, 1] so the JS side can interpolate without conversion.
+// Each colour is RGBA in [0, 1] in *linear* space — three.js's WebGLRenderer
+// gamma-encodes to sRGB on output, so feeding it raw 0..1 from hex would
+// double-encode and wash everything out.
+
+function srgbToLinear(c) {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
 
 function hex(value, alpha = 1.0) {
   const v = value.replace(/^#/, "");
   return [
-    parseInt(v.slice(0, 2), 16) / 255,
-    parseInt(v.slice(2, 4), 16) / 255,
-    parseInt(v.slice(4, 6), 16) / 255,
+    srgbToLinear(parseInt(v.slice(0, 2), 16) / 255),
+    srgbToLinear(parseInt(v.slice(2, 4), 16) / 255),
+    srgbToLinear(parseInt(v.slice(4, 6), 16) / 255),
     alpha,
   ];
 }

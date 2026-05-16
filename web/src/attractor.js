@@ -103,6 +103,8 @@ export class Attractor {
 
     this.simTick = 0;
     this._fitFraming();
+    // _warmupAndFitFraming() will be re-enabled once trails are in: without
+    // trails the visited bbox leaves the instantaneous cluster looking tiny.
   }
 
   _updateGravityCoupling() {
@@ -306,14 +308,60 @@ export class Attractor {
   }
 
   _fitFraming() {
-    // Bbox-based framing with the same 1.45x / 1.15x diagonal margins the
-    // Python version applies. The Python display additionally runs the
-    // simulation forward to shrink the framing to where the cloud actually
-    // lives — that's planned for iteration 2 alongside cycling.
+    // Initial conservative fit from the attractor's full bbox. Replaced by
+    // _warmupAndFitFraming below once we know where the cloud actually lives.
     const fr = bboxCenterAndScale(this.entry.bbox);
     this.framingCenter = fr.center.slice();
     const diag = Math.sqrt(fr.ranges[0] ** 2 + fr.ranges[1] ** 2 + fr.ranges[2] ** 2) * 0.5;
     this.framingScale = Math.max(fr.scale * 1.45 + 1.0, diag * 1.15 + 1.0);
+  }
+
+  _warmupAndFitFraming(steps = 2400) {
+    // Mirror of live_display.precompute_camera_framing: run the integrator
+    // forward, measure the bounds the cloud actually visits, then fit to
+    // those bounds rather than the (often much larger) attractor bbox. This
+    // is what stops gravity-bound clouds from rendering as tiny dots.
+    const n = this.points;
+    const initialStates = this.states.slice();
+
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const x = this.states[i * 3 + 0];
+      const y = this.states[i * 3 + 1];
+      const z = this.states[i * 3 + 2];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+    for (let s = 0; s < steps; s++) {
+      this.step();
+      const st = this.states;
+      for (let i = 0; i < n; i++) {
+        const x = st[i * 3 + 0], y = st[i * 3 + 1], z = st[i * 3 + 2];
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+      }
+    }
+
+    // Restore the cloud to its initial seeded state and clear the velocity /
+    // speed-EMA trackers so the rendered run starts fresh.
+    this.states.set(initialStates);
+    this.simTick = 0;
+    this.prevVelocity.fill(0);
+    this.speedEma.fill(0);
+    this.currentSpeedNorm.fill(0);
+    this.currentCurvatureNorm.fill(0);
+
+    const rx = Math.max(maxX - minX, MIN_BBOX_RANGE);
+    const ry = Math.max(maxY - minY, MIN_BBOX_RANGE);
+    const rz = Math.max(maxZ - minZ, MIN_BBOX_RANGE);
+    this.framingCenter = [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2];
+    const maxAxis = Math.max(rx, ry, rz);
+    const diag = Math.sqrt(rx * rx + ry * ry + rz * rz) * 0.5;
+    this.framingScale = Math.max(maxAxis * 1.45 + 1.0, diag * 1.15 + 1.0);
   }
 
   orbitCamera(camera, t) {

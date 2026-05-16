@@ -25,14 +25,16 @@ async function main() {
   const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.01, 1e6);
   camera.up.set(0, 0, 1);
 
-  const entry = entries[0];
+  const params = new URLSearchParams(window.location.search);
+  const startIndex = Math.max(0, Math.min(entries.length - 1, parseInt(params.get("index") ?? "0", 10) || 0));
+  const entry = entries[startIndex];
   const attractor = new Attractor(entry, preset);
   const particles = new ParticleField(attractor, palette);
   scene.add(particles.mesh);
 
   const hud = document.getElementById("hud");
   hud.textContent =
-    `CHAOTIC ATTRACTORS  ·  01/${String(entries.length).padStart(2, "0")}  ` +
+    `CHAOTIC ATTRACTORS  ·  ${String(startIndex + 1).padStart(2, "0")}/${String(entries.length).padStart(2, "0")}  ` +
     `seed ${entry.seed}  ·  λ ${entry.lyapunov.toFixed(3)}  ·  ${QUALITY}  ·  ${palette.name}`;
 
   resize();
