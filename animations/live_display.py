@@ -12,6 +12,8 @@ Controls:
     r           reset the current attractor
     p           switch color palette
     + / -       increase / decrease flow speed
+    [ / ]       decrease / increase inter-particle gravity
+    , / .       decrease / increase proximity speed boost
     h           toggle the minimal HUD
     q / Esc     quit
 """
@@ -131,6 +133,8 @@ class LiveDisplay:
         quality: str,
         auto_seconds: float = 45.0,
         velocity_gain: float = 1.28,
+        gravity_strength: float = 0.25,
+        proximity_gain: float = 0.85,
         start_index: int = 0,
         fullscreen: bool = True,
         size: tuple[int, int] = (1600, 1000),
@@ -145,6 +149,8 @@ class LiveDisplay:
         self.quality = quality
         self.auto_seconds = auto_seconds
         self.velocity_gain = velocity_gain
+        self.gravity_strength = gravity_strength
+        self.proximity_gain = proximity_gain
         self.idx = start_index % len(entries)
         self.palette_idx = 0
         self.paused = False
@@ -201,6 +207,16 @@ class LiveDisplay:
         self.center, self.scale = bbox_center_and_scale(entry["bbox"])
         self.display_scale = max(self.scale, 1.0)
         self.bounds = self.display_scale * 2.6 + 2.0
+        # Gravity is meant to be a visible nudge, not a dominating force.
+        # Strong chaos (large Lyapunov exponent) keeps the cloud spread out, so
+        # it can carry a heavier gravitational pull without collapsing onto a
+        # single point. Quieter attractors get gentler gravity. Softening
+        # bounds the peak per-pair force.
+        lyapunov = float(entry.get("lyapunov", 0.5))
+        self.gravity_adapt = max(0.0, min(1.0, (lyapunov / 1.5) ** 2))
+        self.gravity_coupling = self.gravity_strength * self.gravity_adapt * self.display_scale ** 2 * 0.18
+        self.gravity_softening_sq = max(self.display_scale * 0.18, 0.18) ** 2
+        self.proximity_radius = max(self.display_scale * 0.30, 0.30)
 
         rng = np.random.default_rng(entry["seed"] + self.points)
         self.initial_origin = np.asarray(self.attractor.initial_state, dtype=np.float64)
@@ -273,12 +289,36 @@ class LiveDisplay:
         micro = 1.0 + 0.035 * np.sin(tick * 0.043 + self.speed_phase * 1.71)
         return np.clip(self.dt * self.velocity_gain * self.base_speed * breath * pulse * micro, self.dt * 0.45, self.dt * 2.25)
 
+    def gravity_field(self, states: np.ndarray) -> np.ndarray:
+        """Pairwise softened inverse-square attraction between particles."""
+        if self.gravity_coupling == 0.0:
+            return np.zeros_like(states)
+        diff = states[None, :, :] - states[:, None, :]                          # (N, N, 3)
+        dist_sq = np.einsum("ijk,ijk->ij", diff, diff) + self.gravity_softening_sq
+        inv_r3 = dist_sq ** -1.5
+        np.fill_diagonal(inv_r3, 0.0)
+        return self.gravity_coupling * np.einsum("ij,ijk->ik", inv_r3, diff)
+
+    def proximity_factor(self, states: np.ndarray) -> np.ndarray:
+        """Per-particle timestep multiplier: closer to a neighbour → faster."""
+        if self.proximity_gain == 0.0:
+            return np.ones(len(states), dtype=np.float64)
+        diff = states[None, :, :] - states[:, None, :]
+        dist = np.sqrt(np.einsum("ijk,ijk->ij", diff, diff) + 1e-9)
+        np.fill_diagonal(dist, np.inf)
+        nearest = np.min(dist, axis=1)
+        closeness = np.clip(1.0 - nearest / self.proximity_radius, 0.0, 1.0)
+        return 1.0 + self.proximity_gain * closeness * closeness
+
+    def field(self, states: np.ndarray) -> np.ndarray:
+        return self.derivatives(states) + self.gravity_field(states)
+
     def integrate_states(self, states: np.ndarray, tick: int) -> np.ndarray:
-        h = self.dynamic_timestep(tick)[:, None]
-        k1 = self.derivatives(states)
-        k2 = self.derivatives(states + 0.5 * h * k1)
-        k3 = self.derivatives(states + 0.5 * h * k2)
-        k4 = self.derivatives(states + h * k3)
+        h = (self.dynamic_timestep(tick) * self.proximity_factor(states))[:, None]
+        k1 = self.field(states)
+        k2 = self.field(states + 0.5 * h * k1)
+        k3 = self.field(states + 0.5 * h * k2)
+        k4 = self.field(states + h * k3)
         return states + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
     def rk4_step(self, tick: int) -> None:
@@ -422,7 +462,10 @@ class LiveDisplay:
         color = body * (1.0 - excitation) + head * excitation
         ghost_mix = np.power(age, 0.95)
         color = color * (1.0 - ghost_mix) + ghost * ghost_mix
-        fade = np.power(1.0 - age, 0.74 + 0.16 * speed)
+        # Exponential fade reads as a true "fading trail" — old segments
+        # disappear instead of lingering as low-alpha smudges. Fast particles
+        # keep slightly longer tails, so velocity becomes legible in the trail.
+        fade = np.exp(-age * (2.6 - 0.95 * speed))
         color[:, :, 3:4] *= fade * (0.46 + 0.54 * speed) * (0.68 + 0.35 * depth)
         color = np.clip(color, 0.0, 1.0).astype(np.float32)
         colors = np.repeat(color[:, :, None, :], 2, axis=2).reshape(-1, 4)
@@ -471,6 +514,7 @@ class LiveDisplay:
         self.title.text = (
             f"CHAOTIC ATTRACTORS  ·  {self.idx + 1:02d}/{len(self.entries):02d}  "
             f"seed {entry['seed']}  ·  λ {entry['lyapunov']:.3f}  ·  flow {self.velocity_gain:.2f}×  "
+            f"·  g {self.gravity_strength:.2f}  ·  prox {self.proximity_gain:.2f}  "
             f"·  {self.quality}  ·  {self.palette.name}"
         )
 
@@ -504,6 +548,28 @@ class LiveDisplay:
             self.update_hud()
         elif key in ("-", "_"):
             self.velocity_gain = max(0.30, self.velocity_gain - 0.12)
+            self.precompute_camera_framing()
+            self.apply_camera_framing()
+            self.update_hud()
+        elif key in ("]", "}"):
+            self.gravity_strength = min(3.0, self.gravity_strength + 0.1)
+            self.gravity_coupling = self.gravity_strength * self.gravity_adapt * self.display_scale ** 2 * 0.18
+            self.precompute_camera_framing()
+            self.apply_camera_framing()
+            self.update_hud()
+        elif key in ("[", "{"):
+            self.gravity_strength = max(0.0, self.gravity_strength - 0.1)
+            self.gravity_coupling = self.gravity_strength * self.gravity_adapt * self.display_scale ** 2 * 0.18
+            self.precompute_camera_framing()
+            self.apply_camera_framing()
+            self.update_hud()
+        elif key in (".", ">"):
+            self.proximity_gain = min(3.0, self.proximity_gain + 0.1)
+            self.precompute_camera_framing()
+            self.apply_camera_framing()
+            self.update_hud()
+        elif key in (",", "<"):
+            self.proximity_gain = max(0.0, self.proximity_gain - 0.1)
             self.precompute_camera_framing()
             self.apply_camera_framing()
             self.update_hud()
@@ -542,6 +608,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=None, help="integration steps per frame")
     parser.add_argument("--auto-seconds", type=float, default=45.0, help="seconds before auto-advancing; 0 disables")
     parser.add_argument("--velocity-gain", type=float, default=1.28, help="global multiplier for dynamic particle flow")
+    parser.add_argument("--gravity", type=float, default=0.25, help="inter-particle gravity strength (0 disables)")
+    parser.add_argument("--proximity", type=float, default=0.85, help="speed boost when particles get close (0 disables)")
     parser.add_argument("--index", type=int, default=0, help="start index after sorting by Lyapunov exponent")
     parser.add_argument("--windowed", action="store_true", help="start windowed instead of fullscreen")
     parser.add_argument("--no-hud", action="store_true", help="hide the minimal overlay text")
@@ -561,6 +629,8 @@ def main() -> None:
         quality=args.quality,
         auto_seconds=args.auto_seconds,
         velocity_gain=args.velocity_gain,
+        gravity_strength=args.gravity,
+        proximity_gain=args.proximity,
         start_index=args.index,
         fullscreen=not args.windowed,
         show_hud=not args.no_hud,
